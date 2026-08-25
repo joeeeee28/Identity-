@@ -1,0 +1,20 @@
+import { useState, type FormEvent } from 'react'
+import { api, ApiError } from './api'
+import type { SessionUser } from './types'
+import { Icon } from './components/Icon'
+import { Logo } from './components/Logo'
+import { Button } from './components/Ui'
+
+export function Login({ onAuthenticated }: { onAuthenticated: (user: SessionUser) => void }) {
+  const [email, setEmail] = useState('maya.chen@northstar.example')
+  const [password, setPassword] = useState('')
+  const [tenantSlug, setTenantSlug] = useState('northstar-holdings')
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
+  const submit = async (event: FormEvent) => {
+    event.preventDefault(); if (loading) return
+    setLoading(true); setError('')
+    try { const result = await api.login(email, password, tenantSlug); onAuthenticated(result.user) } catch (caught) { setError(caught instanceof ApiError ? caught.message : 'Sign-in could not be completed.') } finally { setLoading(false) }
+  }
+  return <div className="login-page"><div className="login-backdrop"><span /><span /><span /></div><header className="login-header"><Logo /><span className="login-secure"><Icon name="lock" size={13} /> Secure enterprise access</span></header><main className="login-main"><section className="login-story"><div className="eyebrow">THE INTELLIGENCE LAYER OF THE ENTERPRISE</div><h1>Ask. Verify.<br /><em>Act with confidence.</em></h1><p>Unify trusted knowledge, governed AI and durable workflows in one secure workspace for your organization.</p><div className="login-proof"><div><span><Icon name="shield-check" size={15} /></span><strong>Permission first</strong><small>Tenant-isolated by design</small></div><div><span><Icon name="sparkles" size={15} /></span><strong>Evidence grounded</strong><small>Every answer can be verified</small></div><div><span><Icon name="workflow" size={15} /></span><strong>Human governed</strong><small>Actions stay under control</small></div></div></section><section className="login-card"><div className="login-card-heading"><span className="login-orb"><Icon name="network" size={19} /></span><div><div className="eyebrow">WELCOME BACK</div><h2>Sign in to Smart-Corp AI</h2><p>Use your organization identity to continue.</p></div></div><form onSubmit={submit}><label className="field-label">Work email<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@company.com" autoComplete="email" required /></label><label className="field-label">Organization ID<input value={tenantSlug} onChange={(event) => setTenantSlug(event.target.value)} placeholder="your-organization" autoComplete="organization" required /><small className="field-hint">Your workspace slug, not a display name.</small></label><label className="field-label">Password<div className="password-field"><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Enter your password" autoComplete="current-password" required /><Icon name="lock" size={15} /></div></label>{error && <div className="login-error"><Icon name="alert" size={15} /> {error}</div>}<Button type="submit" className="login-submit" icon="arrow-right" disabled={loading}>{loading ? 'Authenticating…' : 'Continue securely'}</Button></form><div className="login-divider"><span>or continue with</span></div><div className="sso-options"><button type="button" onClick={() => setError('OIDC is configured by your organization administrator.')}><span className="sso-logo">M</span> Microsoft Entra ID</button><button type="button" onClick={() => setError('SAML is configured by your organization administrator.')}><span className="sso-logo google">G</span> Enterprise SSO</button></div><small className="login-legal">By continuing, you agree to your organization’s security and acceptable use policies.</small></section></main><footer className="login-footer"><span>© 2026 Smart-Corp AI</span><span><Icon name="shield-check" size={12} /> SOC 2 readiness controls enabled</span><button type="button">Privacy & security</button></footer></div>
+}

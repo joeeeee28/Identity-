@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.vite/
+.env
+.env.*
+!.env.example
+storage-data/
+*.log
+*.tsbuildinfo
+coverage/
+.DS_Store
+
+# Generated Phase 6 learning snapshot (run npm run phase6:evaluate)
+reports/phase6-product-learning-latest.json
