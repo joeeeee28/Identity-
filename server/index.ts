@@ -7,6 +7,7 @@ import { parse as parseCookie, serialize as serializeCookie } from 'cookie'
 import { z } from 'zod'
 import { config } from './config.js'
 import { logger } from './logger.js'
+import { metrics } from './metrics.js'
 import { AppError, asAppError } from './errors.js'
 import { createStore } from './store.js'
 import { createObjectStorage } from './storage.js'
@@ -36,7 +37,13 @@ app.use((req, res, next) => {
   const started = Date.now()
   res.setHeader('x-request-id', id)
   ;(req as AuthedRequest).requestId = id
-  res.on('finish', () => logger.info('http_request', { requestId: id, method: req.method, path: req.path, statusCode: res.statusCode, latencyMs: Date.now() - started }))
+  res.on('finish', () => {
+    const latencyMs = Date.now() - started
+    metrics.increment('smart_corp_http_requests_total')
+    metrics.observe('smart_corp_http_request_duration_seconds', latencyMs / 1000)
+    if (res.statusCode >= 400) metrics.increment('smart_corp_http_errors_total')
+    logger.info('http_request', { requestId: id, method: req.method, path: req.path, statusCode: res.statusCode, latencyMs })
+  })
   next()
 })
 app.use((req, res, next) => {
@@ -116,7 +123,9 @@ app.get('/health/ready', asyncRoute(async (_req, res) => {
 }))
 app.get('/metrics', asyncRoute(async (_req, res) => {
   const health = await store.getHealth()
-  res.type('text/plain').send(`# HELP smart_corp_process_uptime_seconds Process uptime.\n# TYPE smart_corp_process_uptime_seconds gauge\nsmart_corp_process_uptime_seconds ${Math.round((Date.now() - startedAt) / 1000)}\n# HELP smart_corp_dependency_ready Dependency readiness.\n# TYPE smart_corp_dependency_ready gauge\nsmart_corp_dependency_ready{dependency="database"} ${health.database === 'connected' || health.database === 'development' ? 1 : 0}\n`)
+  const uptime = `# HELP smart_corp_process_uptime_seconds Process uptime.\n# TYPE smart_corp_process_uptime_seconds gauge\nsmart_corp_process_uptime_seconds ${Math.round((Date.now() - startedAt) / 1000)}\n`
+  const dependency = `# HELP smart_corp_dependency_ready Dependency readiness.\n# TYPE smart_corp_dependency_ready gauge\nsmart_corp_dependency_ready{dependency="database"} ${health.database === 'connected' || health.database === 'development' ? 1 : 0}\nsmart_corp_dependency_ready{dependency="queue"} ${health.queue === 'unavailable' ? 0 : 1}\nsmart_corp_dependency_ready{dependency="ai_gateway"} ${health.aiGateway === 'development' ? 0 : 1}\n`
+  res.type('text/plain').send(metrics.render() + uptime + dependency)
 }))
 
 const loginSchema = z.object({ email: z.string().trim().email().max(320), password: z.string().min(1).max(256), tenantSlug: z.string().trim().max(120).optional() })

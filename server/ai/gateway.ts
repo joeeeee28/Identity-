@@ -1,5 +1,6 @@
 import { AppError } from '../errors.js'
 import { config } from '../config.js'
+import { metrics } from '../metrics.js'
 import type { Citation } from '../types.js'
 import type { IntentAnalysis } from './intent.js'
 import { ModelRouter, type ModelRoute, type ModelProviderName } from './models.js'
@@ -154,12 +155,17 @@ export class ModelGateway {
         const routedRequest = { ...request, route }
         const result = await provider.complete(routedRequest, models[index])
         validateGeneration(routedRequest, result)
-        return { ...result, latencyMs: Math.round(performance.now() - started), attempts: index + 1, fallbackUsed: index > 0 }
+        const latencyMs = Math.round(performance.now() - started)
+        metrics.increment('smart_corp_ai_calls_total')
+        metrics.observe('smart_corp_ai_duration_seconds', latencyMs / 1000)
+        metrics.increment('smart_corp_ai_tokens_total', result.inputTokens + result.outputTokens)
+        return { ...result, latencyMs, attempts: index + 1, fallbackUsed: index > 0 }
       } catch (error) {
         lastError = error
         if (index < models.length - 1) await new Promise((resolve) => setTimeout(resolve, Math.min(500, 150 * 2 ** index)))
       }
     }
+    metrics.increment('smart_corp_ai_errors_total')
     throw lastError
   }
 
