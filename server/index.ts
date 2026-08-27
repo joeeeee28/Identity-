@@ -9,6 +9,13 @@ import { config } from './config.js'
 import { logger } from './logger.js'
 import { metrics } from './metrics.js'
 import { AppError, asAppError } from './errors.js'
+import { TenantDb, PgConnector } from './db.js'
+import { KillSwitchService } from './killSwitch.js'
+import { ApprovalService } from './approvals.js'
+import { GovernedActionService } from './actions.js'
+import { ConnectorService } from './connector.js'
+import { IdentityService } from './identity.js'
+import { Pool } from 'pg'
 import { createStore } from './store.js'
 import { createObjectStorage } from './storage.js'
 import { createMalwareScanner } from './security.js'
@@ -19,6 +26,19 @@ import type { TenantContext } from './types.js'
 
 const app = express()
 const store = createStore()
+
+// P0 production services (require PostgreSQL). Absent in the development adapter,
+// the routes below fail closed with a clear 503 rather than degrading silently.
+const p0Db = config.databaseUrl ? new TenantDb(new PgConnector(new Pool({ connectionString: config.databaseUrl, ssl: config.databaseSsl ? { rejectUnauthorized: false } : undefined, max: 10, statement_timeout: 15_000 }))) : null
+const killSwitch = p0Db ? new KillSwitchService(p0Db) : null
+const approvals = p0Db ? new ApprovalService(p0Db) : null
+const governedActions = p0Db && approvals ? new GovernedActionService(p0Db, approvals) : null
+const connectors = p0Db ? new ConnectorService(p0Db) : null
+const identity = p0Db ? new IdentityService(p0Db) : null
+
+const requireP0 = () => {
+  if (!p0Db) throw new AppError(503, 'P0_REQUIRES_POSTGRES', 'This capability requires the PostgreSQL production backend.')
+}
 const objectStorage = createObjectStorage()
 const malwareScanner = createMalwareScanner()
 const startedAt = Date.now()
@@ -143,6 +163,13 @@ app.post('/api/auth/logout', asyncRoute(async (req, res) => {
   res.setHeader('Set-Cookie', serializeCookie('sc_session', '', { httpOnly: true, secure: config.nodeEnv === 'production', sameSite: 'lax', path: '/', maxAge: 0 }))
   res.status(204).end()
 }))
+app.post('/api/auth/oidc', limit('oidc', 20, 15 * 60 * 1000), asyncRoute(async (req, res) => {
+  const input = z.object({ code: z.string().trim().min(1).max(4096) }).parse(req.body)
+  requireP0()
+  const result = await identity!.exchangeCode(input.code)
+  res.setHeader('Set-Cookie', serializeCookie('sc_session', result.token, { httpOnly: true, secure: config.nodeEnv === 'production', sameSite: 'lax', path: '/', maxAge: 8 * 60 * 60 }))
+  res.json({ user: result.session })
+}))
 app.get('/api/auth/session', requireAuth, (req: AuthedRequest, res) => res.json({ user: req.context }))
 
 app.use('/api', requireAuth)
@@ -212,6 +239,54 @@ app.post('/api/evaluations/run', requirePermission('governance.manage'), asyncRo
 app.get('/api/governance/policies', requirePermission('governance.read'), asyncRoute(async (req, res) => res.json({ items: await store.listPolicies(req.context!) })))
 app.get('/api/admin/users', requirePermission('users.read'), asyncRoute(async (req, res) => res.json({ items: await store.listUsers(req.context!) })))
 app.get('/api/admin/configuration/:section', requirePermission('settings.manage'), asyncRoute(async (req, res) => res.json({ items: await store.listAdminConfiguration(req.context!, String(req.params.section)) })))
+
+// --- P0 governance: kill switch, approvals, governed actions, connectors, orchestration ---
+app.get('/api/governance/kill-switch', requirePermission('governance.read'), asyncRoute(async (req, res) => { requireP0(); res.json(await killSwitch!.stateByTenant(req.context!.tenantId)) }))
+app.post('/api/governance/kill-switch', requirePermission('governance.manage'), asyncRoute(async (req, res) => {
+  const input = z.object({ enabled: z.boolean(), reason: z.string().trim().max(500) }).parse(req.body)
+  requireP0()
+  res.json(await killSwitch!.setEnabled(req.context!, input.enabled, input.reason))
+}))
+
+app.get('/api/approvals', requirePermission('workflow.execute'), asyncRoute(async (req, res) => {
+  const status = z.enum(['pending', 'approved', 'rejected', 'expired', 'cancelled', 'escalated']).optional().parse(req.query.status)
+  requireP0()
+  res.json({ items: await approvals!.list(req.context!, status) })
+}))
+app.post('/api/approvals', requirePermission('workflow.execute'), asyncRoute(async (req, res) => {
+  const input = z.object({ actionKey: z.string().trim().min(1).max(120), resourceRef: z.string().trim().min(1).max(120), riskLevel: z.enum(['low', 'medium', 'high', 'critical']), reason: z.string().trim().min(1).max(500), expiresInSeconds: z.number().int().positive().optional() }).parse(req.body)
+  requireP0()
+  res.status(201).json(await approvals!.create(req.context!, input))
+}))
+app.post('/api/approvals/:approvalId/decision', requirePermission('workflow.execute'), asyncRoute(async (req, res) => {
+  const input = z.object({ decision: z.enum(['approved', 'rejected', 'escalated', 'cancelled']), reason: z.string().trim().max(500) }).parse(req.body)
+  requireP0()
+  res.json(await approvals!.decide(req.context!, String(req.params.approvalId), input.decision, input.reason))
+}))
+
+app.post('/api/actions/preview', requirePermission('knowledge.read'), asyncRoute(async (req, res) => {
+  const input = z.object({ actionKey: z.enum(['archive_document', 'restore_document']), documentId: z.string().min(1).max(120) }).parse(req.body)
+  requireP0()
+  res.json(await governedActions!.preview(req.context!, input.actionKey, { documentId: input.documentId }))
+}))
+app.post('/api/actions/execute', requirePermission('knowledge.manage'), asyncRoute(async (req, res) => {
+  const input = z.object({ actionKey: z.enum(['archive_document', 'restore_document']), documentId: z.string().min(1).max(120), approvalId: z.string().max(120).optional(), idempotencyKey: z.string().max(200).optional() }).parse(req.body)
+  requireP0()
+  res.status(202).json(await governedActions!.execute(req.context!, input.actionKey, { documentId: input.documentId, approvalId: input.approvalId, idempotencyKey: input.idempotencyKey }))
+}))
+app.post('/api/actions/:actionId/verify', requirePermission('knowledge.read'), asyncRoute(async (req, res) => { requireP0(); res.json(await governedActions!.verify(req.context!, String(req.params.actionId))) }))
+app.post('/api/actions/:actionId/rollback', requirePermission('knowledge.manage'), asyncRoute(async (req, res) => { requireP0(); res.json(await governedActions!.rollback(req.context!, String(req.params.actionId))) }))
+
+app.post('/api/connectors/:connectionId/sync', requirePermission('settings.manage'), asyncRoute(async (req, res) => { requireP0(); res.status(202).json(await connectors!.runSync(req.context!, String(req.params.connectionId))) }))
+
+app.post('/api/orchestration/run', requirePermission('agents.execute'), asyncRoute(async (req, res) => {
+  z.object({ task: z.string().trim().min(1).max(2000), plan: z.array(z.object({ agent: z.string().trim().min(1).max(120), task: z.string().trim().min(1).max(1000) })).min(1).max(10) }).parse(req.body)
+  requireP0()
+  // No autonomous agents exist yet; an explicit executor registry must be wired
+  // before this route runs live agents. It validates and enforces governance,
+  // then fails closed rather than fabricating agent execution.
+  res.status(501).json({ error: { code: 'ORCHESTRATION_EXECUTORS_UNAVAILABLE', message: 'No agent executors are registered; orchestration is enforcement-ready but has no live agents to run.' } })
+}))
 
 if (config.nodeEnv === 'production') {
   const webRoot = path.resolve(process.cwd(), 'dist')

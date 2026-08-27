@@ -35,6 +35,16 @@ export const config = {
   rateLimitUploadsPerHour: Number(process.env.RATE_LIMIT_UPLOADS_PER_HOUR ?? 20),
   webAllowedDomains: (process.env.WEB_ALLOWED_DOMAINS ?? '').split(',').map((domain) => domain.trim().toLowerCase()).filter(Boolean),
   requestIdHeader: 'x-request-id',
+  // OIDC identity. When oidcIssuer is set, the OIDC login route is enabled; in
+  // production with an issuer configured, password/dev bypass is not the primary
+  // path. All fields must be present for the flow to activate (fail closed).
+  oidcIssuer: process.env.OIDC_ISSUER ?? '',
+  oidcClientId: process.env.OIDC_CLIENT_ID ?? '',
+  oidcClientSecret: process.env.OIDC_CLIENT_SECRET ?? '',
+  oidcRedirectUri: process.env.OIDC_REDIRECT_URI ?? '',
+  oidcTenantClaim: process.env.OIDC_TENANT_CLAIM ?? 'tenant_id',
+  oidcRolesClaim: process.env.OIDC_ROLES_CLAIM ?? 'roles',
+  oidcRequireMfa: asBoolean(process.env.OIDC_REQUIRE_MFA, false),
 }
 
 export const hashOpaqueToken = (token: string) => crypto.createHash('sha256').update(token).digest('hex')

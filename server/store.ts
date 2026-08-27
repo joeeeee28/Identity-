@@ -9,6 +9,9 @@ import { getPromptTemplate } from './ai/prompts.js'
 import { buildDelegationPlan } from './ai/orchestrator.js'
 import { toolRegistry } from './ai/tools.js'
 import { resolveFollowUpQuery, retrieveDevelopmentKnowledge } from './ai/retrieval.js'
+import { KillSwitchService } from './killSwitch.js'
+import { appendOutboxEvent } from './outbox.js'
+import { TenantDb, PgConnector } from './db.js'
 import { OpenAIEmbeddingProvider, vectorLiteral } from './ai/embeddings.js'
 import { WebResearchGateway } from './ai/web.js'
 import { DevelopmentStructuredDataProvider, PostgresStructuredDataProvider, renderStructuredResult } from './ai/structured.js'
@@ -462,11 +465,13 @@ export class PostgresStore implements Store {
   private readonly gateway = new ModelGateway()
   private readonly structuredData: PostgresStructuredDataProvider
   private readonly embeddings = new OpenAIEmbeddingProvider()
+  private readonly killSwitch: KillSwitchService
   private evaluation: EvaluationSnapshot | null = null
 
   constructor() {
     if (!config.databaseUrl) throw new Error('DATABASE_URL is required for PostgresStore')
     this.pool = new Pool({ connectionString: config.databaseUrl, ssl: config.databaseSsl ? { rejectUnauthorized: false } : undefined, max: 20, statement_timeout: 15_000 })
+    this.killSwitch = new KillSwitchService(new TenantDb(new PgConnector(this.pool)))
     this.structuredData = new PostgresStructuredDataProvider(this.pool)
   }
 
@@ -679,6 +684,7 @@ export class PostgresStore implements Store {
       const doc = await client.query(`INSERT INTO documents (tenant_id, title, owner_id, department_id, classification, status, source_name, created_by, updated_by) VALUES ($1, $2, $3, $4, $5, 'processing', 'Workspace upload', $3, $3) RETURNING id, updated_at`, [ctx.tenantId, input.title, ctx.userId, ctx.departmentId || null, input.classification])
       await client.query(`INSERT INTO document_versions (tenant_id, document_id, version_number, version_label, file_name, file_type, file_size_bytes, storage_key, created_by) VALUES ($1, $2, 1, 'v1.0', $3, $4, $5, $6, $7)`, [ctx.tenantId, doc.rows[0].id, input.fileName, input.fileType, input.fileSize, input.storageKey, ctx.userId])
       await client.query(`INSERT INTO document_processing_jobs (tenant_id, document_id, job_type, status, idempotency_key, created_by) VALUES ($1, $2, 'ingestion', 'queued', $3, $4) ON CONFLICT (tenant_id, idempotency_key) DO NOTHING`, [ctx.tenantId, doc.rows[0].id, `ingest:${doc.rows[0].id}:1`, ctx.userId])
+      await appendOutboxEvent(client, { tenantId: ctx.tenantId, aggregateType: 'document', aggregateId: doc.rows[0].id, eventType: 'document.created', payload: { documentId: doc.rows[0].id, title: input.title }, idempotencyKey: `document.created:${doc.rows[0].id}` })
       await client.query('COMMIT')
       return { id: doc.rows[0].id, title: input.title, source: 'Workspace upload', owner: ctx.displayName, department: 'Organization', classification: input.classification, status: 'processing' as const, pages: 0, chunks: 0, version: 'v1.0', updatedAt: new Date(doc.rows[0].updated_at).toISOString(), nextReview: new Date(Date.now() + 90 * 86400000).toISOString(), trust: 0, fileSize: asFileSize(input.fileSize), fileType: input.fileType.split('/').pop()?.toUpperCase() ?? 'FILE', tags: [] }
     } catch (error) { await client.query('ROLLBACK'); throw error } finally { client.release() }
@@ -742,7 +748,13 @@ export class PostgresStore implements Store {
   async listAgents(ctx: TenantContext) { const result = await this.tenantQuery(ctx, 'SELECT id, name, LEFT(name, 1) || COALESCE(SUBSTRING(name FROM POSITION(\' \' IN name) + 1 FOR 1), \'\') AS initials, description, category, status, version_label AS version, model_name AS model, knowledge_source_count AS "knowledgeSources", tool_count AS "toolCount", monthly_queries AS "monthlyQueries", trust_score AS trust, accent, owner_name AS owner, updated_at AS "lastUpdated" FROM ai_agents WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY updated_at DESC', [ctx.tenantId]); return result.rows }
   async listMeetings(ctx: TenantContext): Promise<MeetingRecord[]> { const result = await this.tenantQuery(ctx, `SELECT m.id, m.title, upper(to_char(COALESCE(m.start_at, m.created_at), 'MON')) AS month, to_char(COALESCE(m.start_at, m.created_at), 'DD') AS day, to_char(COALESCE(m.start_at, m.created_at), 'Mon DD') || ' · ' || COALESCE(to_char(m.end_at - m.start_at, 'MI') || ' min', 'Duration pending') || ' · ' || (SELECT count(*) FROM meeting_participants mp WHERE mp.tenant_id = m.tenant_id AND mp.meeting_id = m.id) || ' participants' AS meta, CASE WHEN ms.id IS NOT NULL THEN 'Summary ready' WHEN m.status = 'processing' THEN 'Processing' ELSE 'Needs review' END AS status, CASE WHEN ms.id IS NOT NULL THEN 'success' WHEN m.status = 'processing' THEN 'info' ELSE 'warning' END AS tone, CASE WHEN ms.id IS NOT NULL THEN 'file-check' ELSE 'clipboard-check' END AS icon FROM meetings m LEFT JOIN meeting_summaries ms ON ms.tenant_id = m.tenant_id AND ms.meeting_id = m.id WHERE m.tenant_id = $1 ORDER BY COALESCE(m.start_at, m.created_at) DESC LIMIT 50`, [ctx.tenantId]); return result.rows.map((row) => ({ ...row, tone: row.tone as MeetingRecord['tone'] })) }
   async listWorkflows(ctx: TenantContext) { const result = await this.tenantQuery(ctx, 'SELECT id, name, description, status, trigger_label AS trigger, last_run_label AS "lastRun", success_rate AS "successRate", execution_count AS executions, requires_approval AS "requiresApproval", step_count AS steps FROM workflows WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY updated_at DESC', [ctx.tenantId]); return result.rows }
-  async executeWorkflow(ctx: TenantContext, workflowId: string) { const result = await this.tenantQuery(ctx, `INSERT INTO workflow_executions (tenant_id, workflow_id, triggered_by, status, idempotency_key) SELECT $1, id, $2, CASE WHEN requires_approval THEN 'awaiting_approval' ELSE 'queued' END, $3 FROM workflows WHERE id = $4 AND tenant_id = $1 AND status = 'active' RETURNING id, status`, [ctx.tenantId, ctx.userId, `manual:${workflowId}:${ctx.requestId}`, workflowId]); if (!result.rows[0]) throw new AppError(404, 'WORKFLOW_NOT_FOUND', 'The active workflow could not be found.'); return { executionId: result.rows[0].id, status: result.rows[0].status, message: result.rows[0].status === 'awaiting_approval' ? 'Execution created and routed to an approver.' : 'Execution queued for the worker service.' } }
+  async executeWorkflow(ctx: TenantContext, workflowId: string) {
+    await this.killSwitch.assertAutonomyAllowed(ctx)
+    return this.tenantQuery(ctx, `INSERT INTO workflow_executions (tenant_id, workflow_id, triggered_by, status, idempotency_key) SELECT $1, id, $2, CASE WHEN requires_approval THEN 'awaiting_approval' ELSE 'queued' END, $3 FROM workflows WHERE id = $4 AND tenant_id = $1 AND status = 'active' RETURNING id, status`, [ctx.tenantId, ctx.userId, `manual:${workflowId}:${ctx.requestId}`, workflowId]).then((result) => {
+      if (!result.rows[0]) throw new AppError(404, 'WORKFLOW_NOT_FOUND', 'The active workflow could not be found.')
+      return { executionId: result.rows[0].id, status: result.rows[0].status, message: result.rows[0].status === 'awaiting_approval' ? 'Execution created and routed to an approver.' : 'Execution queued for the worker service.' }
+    })
+  }
   async listAuditEvents(ctx: TenantContext) { const result = await this.tenantQuery(ctx, 'SELECT id, event_type AS "eventType", description, actor_name AS actor, resource_ref AS resource, created_at AS timestamp, outcome, severity FROM audit_events WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 50', [ctx.tenantId]); return result.rows }
   async getAnalytics(ctx: TenantContext) { const result = await this.tenantQuery(ctx, 'SELECT period_label, metric_name, metric_value FROM usage_metrics WHERE tenant_id = $1 ORDER BY period_start DESC LIMIT 100', [ctx.tenantId]); const period = result.rows[0]?.period_label ?? 'Current period'; return { period, summary: result.rows.map((row) => ({ label: row.metric_name, value: String(row.metric_value), detail: 'Live usage metric', trend: 0, icon: 'chart-no-axes-combined' })), aiUsage: [], departmentUsage: [], trustTrend: [], modelUsage: [], valueMetrics: { period, measured: result.rows.slice(0, 8).map((row) => ({ key: String(row.metric_name), label: String(row.metric_name), value: String(row.metric_value), detail: 'Live metric from the usage ledger' })), estimated: [], unavailable: [{ key: 'time_saved', label: 'Time saved', detail: 'Requires task-level baselines or validated time studies' }, { key: 'cost_per_outcome', label: 'Cost per successful outcome', detail: 'Requires linked business outcomes' }] } } }
   async listPolicies(ctx: TenantContext) { const result = await this.tenantQuery(ctx, 'SELECT id, name, category, description, status, updated_at AS "updatedAt", scope_label AS scope, owner_name AS owner FROM governance_policies WHERE tenant_id = $1 ORDER BY updated_at DESC', [ctx.tenantId]); return result.rows }
@@ -832,6 +844,7 @@ export class PostgresStore implements Store {
   }
 
   async actOnDecision(ctx: TenantContext, decisionId: string, workflowId: string): Promise<DecisionRecord> {
+    await this.killSwitch.assertAutonomyAllowed(ctx)
     if (!isUuid(decisionId) || !isUuid(workflowId)) throw new AppError(404, 'DECISION_ACTION_NOT_FOUND', 'The decision or workflow identifier is invalid.')
     const current = (await this.getOperatingIntelligence(ctx)).decisions.find((decision) => decision.id === decisionId)
     if (!current) throw new AppError(404, 'DECISION_NOT_FOUND', 'The decision record could not be found.')
@@ -887,6 +900,7 @@ export class PostgresStore implements Store {
   async executeTool(ctx: TenantContext, toolKey: string, input: unknown, confirmed = false): Promise<ToolExecutionResult> {
     const { definition, input: parsed } = toolRegistry.validate(toolKey, input)
     if (!ctx.roles.includes('org_admin') && !ctx.permissions.includes(definition.permission)) throw new AppError(403, 'TOOL_PERMISSION_DENIED', 'You do not have permission to use this tool.')
+    if (definition.approvalRequired || definition.risk === 'high' || definition.risk === 'critical') await this.killSwitch.assertAutonomyAllowed(ctx)
     const toolExecutionId = crypto.randomUUID()
     if (definition.approvalRequired && !confirmed) {
       await this.tenantQuery(ctx, `INSERT INTO tool_executions (id, tenant_id, tool_key, requested_by, risk_level, status, approval_required, input_redacted) VALUES ($1, $2, $3, $4, $5, 'awaiting_confirmation', true, $6)`, [toolExecutionId, ctx.tenantId, definition.key, ctx.userId, definition.risk, JSON.stringify(parsed)])

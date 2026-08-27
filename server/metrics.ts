@@ -73,3 +73,11 @@ metrics.registerMetric('smart_corp_queue_jobs_dead_lettered_total', 'Total jobs 
 // Security
 metrics.registerMetric('smart_corp_security_scans_total', 'Total malware scans performed.', 'counter')
 metrics.registerMetric('smart_corp_security_detections_total', 'Total malware detections.', 'counter')
+
+// Outbox
+metrics.registerMetric('smart_corp_outbox_published_total', 'Total outbox events delivered.', 'counter')
+metrics.registerMetric('smart_corp_outbox_failed_total', 'Total outbox events that failed delivery.', 'counter')
+
+// Orchestration
+metrics.registerMetric('smart_corp_orchestration_runs_total', 'Total multi-agent orchestration runs.', 'counter')
+metrics.registerMetric('smart_corp_orchestration_failed_total', 'Total orchestration runs that did not complete.', 'counter')
