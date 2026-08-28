@@ -22,6 +22,7 @@ import { KnowledgeHealthService } from './knowledgeHealth.js'
 import { CostService } from './cost.js'
 import { MeetingService } from './meetings.js'
 import { KnowledgeGraphService } from './knowledgeGraph.js'
+import { MemoryService } from './memory.js'
 import { startSpan, extractTraceContext } from './tracing.js'
 import { Pool } from 'pg'
 import { createStore } from './store.js'
@@ -50,6 +51,7 @@ const knowledgeHealth = p0Db ? new KnowledgeHealthService(p0Db) : null
 const cost = p0Db ? new CostService(p0Db) : null
 const meetings = p0Db ? new MeetingService(p0Db) : null
 const knowledgeGraph = p0Db ? new KnowledgeGraphService(p0Db) : null
+const memory = p0Db && knowledgeGraph ? new MemoryService(p0Db, knowledgeGraph) : null
 
 const requireP0 = () => {
   if (!p0Db) throw new AppError(503, 'P0_REQUIRES_POSTGRES', 'This capability requires the PostgreSQL production backend.')
@@ -393,6 +395,45 @@ app.get('/api/graph/traverse/:entityId', requirePermission('analytics.read'), as
   res.json({ items: await knowledgeGraph!.traverse(req.context!, String(req.params.entityId), { relationshipType: type, maxDepth }) })
 }))
 app.delete('/api/graph/entities/:entityId', requirePermission('governance.manage'), asyncRoute(async (req, res) => { requireP0(); await knowledgeGraph!.deleteEntity(req.context!, String(req.params.entityId)); res.status(204).end() }))
+
+// --- P2-B: governed enterprise memory ---
+const memoryScopeEnum = z.enum(['session','task','user','team','organizational','agent'])
+const memoryTypeEnum = z.enum(['fact','preference','decision','task','context','instruction','summary','inference','observation'])
+const memorySourceTypeEnum = z.enum(['document','meeting','decision','conversation','workflow','agent','user','system','connector'])
+app.get('/api/memory', requirePermission('governance.read'), asyncRoute(async (req, res) => {
+  const query = z.object({ scope: memoryScopeEnum.optional(), subjectId: z.string().max(240).optional(), memoryType: memoryTypeEnum.optional(), limit: z.coerce.number().int().min(1).max(200).optional() }).parse(req.query)
+  requireP0()
+  res.json({ items: await memory!.retrieve(req.context!, query) })
+}))
+app.post('/api/memory', requirePermission('governance.read'), asyncRoute(async (req, res) => {
+  const input = z.object({
+    scope: memoryScopeEnum, memoryType: memoryTypeEnum, subjectId: z.string().trim().max(240).optional(),
+    content: z.string().trim().min(1).max(20000), groupId: z.string().max(120).optional(), agentId: z.string().max(120).optional(),
+    sourceType: memorySourceTypeEnum.optional(), sourceId: z.string().trim().max(240).optional(),
+    provenance: z.string().max(40).optional(), confidence: z.number().min(0).max(1).optional(),
+    authority: z.string().trim().max(240).optional(), classification: z.string().max(40).optional(),
+    accessPolicy: z.record(z.string(), z.unknown()).optional(), validUntil: z.string().optional(), expiresAt: z.string().optional(), retentionPolicy: z.string().max(80).optional(),
+  }).parse(req.body)
+  requireP0()
+  res.status(201).json(await memory!.remember(req.context!, input))
+}))
+app.get('/api/memory/:id', requirePermission('governance.read'), asyncRoute(async (req, res) => { requireP0(); res.json(await memory!.get(req.context!, String(req.params.id))) }))
+app.patch('/api/memory/:id', requirePermission('governance.read'), asyncRoute(async (req, res) => {
+  const input = z.object({ content: z.string().trim().min(1).max(20000), reason: z.string().trim().min(1).max(500) }).parse(req.body)
+  requireP0()
+  res.json(await memory!.correct(req.context!, String(req.params.id), input))
+}))
+app.delete('/api/memory/:id', requirePermission('governance.read'), asyncRoute(async (req, res) => {
+  const reason = z.string().trim().max(500).parse(req.query.reason ?? 'user requested deletion')
+  requireP0()
+  res.json(await memory!.forget(req.context!, String(req.params.id), reason))
+}))
+app.post('/api/memory/:id/expire', requirePermission('governance.manage'), asyncRoute(async (req, res) => { requireP0(); res.json(await memory!.expire(req.context!, String(req.params.id))) }))
+app.get('/api/memory-conflicts', requirePermission('governance.read'), asyncRoute(async (req, res) => {
+  const subjectId = z.string().trim().min(1).max(240).parse(req.query.subjectId)
+  requireP0()
+  res.json(await memory!.conflicts(req.context!, subjectId))
+}))
 
 if (config.nodeEnv === 'production') {
   const webRoot = path.resolve(process.cwd(), 'dist')

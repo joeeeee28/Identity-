@@ -89,3 +89,9 @@ metrics.registerMetric('smart_corp_webhook_failed_total', 'Total webhook deliver
 // AI cost
 metrics.registerMetric('smart_corp_ai_cost_estimated_cents_total', 'Total estimated AI cost (cents) recorded.', 'counter')
 metrics.registerMetric('smart_corp_ai_cost_actual_cents_total', 'Total actual (invoice-linked) AI cost (cents) recorded.', 'counter')
+
+// Enterprise memory
+metrics.registerMetric('smart_corp_memory_created_total', 'Total memory records created.', 'counter')
+metrics.registerMetric('smart_corp_memory_retrieved_total', 'Total memory records retrieved (authorized).', 'counter')
+metrics.registerMetric('smart_corp_memory_rejected_total', 'Total memory records rejected by authorization.', 'counter')
+metrics.registerMetric('smart_corp_memory_conflict_total', 'Total memory conflicts detected.', 'counter')
