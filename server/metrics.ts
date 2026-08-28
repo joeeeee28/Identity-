@@ -100,3 +100,7 @@ metrics.registerMetric('smart_corp_memory_conflict_total', 'Total memory conflic
 metrics.registerMetric('smart_corp_routing_decisions_total', 'Total model routing decisions.', 'counter')
 metrics.registerMetric('smart_corp_routing_fail_closed_total', 'Total routing decisions that failed closed.', 'counter')
 metrics.registerMetric('smart_corp_routing_fallback_total', 'Total routing decisions that selected a fallback chain.', 'counter')
+
+// Agent governance
+metrics.registerMetric('smart_corp_agent_created_total', 'Total agents registered.', 'counter')
+metrics.registerMetric('smart_corp_agent_denied_total', 'Total agent executions denied by governance.', 'counter')

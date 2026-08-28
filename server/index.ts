@@ -24,6 +24,7 @@ import { MeetingService } from './meetings.js'
 import { KnowledgeGraphService } from './knowledgeGraph.js'
 import { MemoryService } from './memory.js'
 import { ModelRegistryService } from './modelRegistry.js'
+import { AgentGovernanceService } from './agentGovernance.js'
 import { startSpan, extractTraceContext } from './tracing.js'
 import { Pool } from 'pg'
 import { createStore } from './store.js'
@@ -54,6 +55,7 @@ const meetings = p0Db ? new MeetingService(p0Db) : null
 const knowledgeGraph = p0Db ? new KnowledgeGraphService(p0Db) : null
 const memory = p0Db && knowledgeGraph ? new MemoryService(p0Db, knowledgeGraph) : null
 const modelRegistry = p0Db ? new ModelRegistryService(p0Db) : null
+const agentGovernance = p0Db && killSwitch ? new AgentGovernanceService(p0Db, new AgentRollbackService(p0Db), killSwitch) : null
 
 const requireP0 = () => {
   if (!p0Db) throw new AppError(503, 'P0_REQUIRES_POSTGRES', 'This capability requires the PostgreSQL production backend.')
@@ -482,6 +484,58 @@ if (config.nodeEnv === 'production') {
     res.sendFile(path.join(webRoot, 'index.html'))
   })
 }
+
+// --- P2-D: agent registry & governance ---
+const lifecycleEnum = z.enum(['draft','development','testing','evaluation','security_review','pending_approval','approved','deployed','suspended','rolled_back','retired'])
+const riskEnum = z.enum(['low','medium','high','critical'])
+const autonomyEnum = z.enum(['assist','recommend','execute_with_approval','bounded_autonomous'])
+app.get('/api/agents', requirePermission('agents.read'), asyncRoute(async (req, res) => { requireP0(); res.json({ items: await agentGovernance!.list(req.context!) }) }))
+app.post('/api/agents', requirePermission('agents.read'), asyncRoute(async (req, res) => {
+  const input = z.object({ name: z.string().trim().min(1).max(240), description: z.string().trim().min(1).max(2000), category: z.string().trim().min(1).max(120), purpose: z.string().trim().max(2000).optional(), ownerId: z.string().max(120).optional(), riskLevel: riskEnum.optional(), autonomyLevel: autonomyEnum.optional() }).parse(req.body)
+  requireP0()
+  res.status(201).json(await agentGovernance!.register(req.context!, input))
+}))
+app.get('/api/agents/:id', requirePermission('agents.read'), asyncRoute(async (req, res) => { requireP0(); res.json(await agentGovernance!.get(req.context!, String(req.params.id))) }))
+app.patch('/api/agents/:id', requirePermission('agents.read'), asyncRoute(async (req, res) => {
+  const input = z.object({ name: z.string().trim().min(1).max(240).optional(), description: z.string().trim().min(1).max(2000).optional(), category: z.string().trim().min(1).max(120).optional(), purpose: z.string().trim().max(2000).optional(), riskLevel: riskEnum.optional(), autonomyLevel: autonomyEnum.optional() }).parse(req.body)
+  requireP0()
+  res.json(await agentGovernance!.update(req.context!, String(req.params.id), input))
+}))
+app.post('/api/agents/:id/versions', requirePermission('agents.manage'), asyncRoute(async (req, res) => {
+  const input = z.object({ versionLabel: z.string().trim().min(1).max(80), modelName: z.string().trim().min(1).max(120), toolPolicy: z.record(z.string(), z.unknown()).optional(), dataPolicy: z.record(z.string(), z.unknown()).optional(), riskLevel: riskEnum.optional(), autonomyLevel: autonomyEnum.optional(), promptVersion: z.string().trim().max(80).optional() }).parse(req.body)
+  requireP0()
+  res.status(201).json(await agentGovernance!.createVersion(req.context!, String(req.params.id), input))
+}))
+app.post('/api/agents/:id/transition', requirePermission('agents.manage'), asyncRoute(async (req, res) => {
+  const input = z.object({ target: lifecycleEnum, reason: z.string().trim().min(1).max(500) }).parse(req.body)
+  requireP0()
+  res.json(await agentGovernance!.transition(req.context!, String(req.params.id), input.target, input.reason))
+}))
+app.post('/api/agents/:id/approve', requirePermission('governance.manage'), asyncRoute(async (req, res) => {
+  const input = z.object({ reason: z.string().trim().min(1).max(500) }).parse(req.body)
+  requireP0()
+  res.json(await agentGovernance!.approve(req.context!, String(req.params.id), input.reason))
+}))
+app.post('/api/agents/:id/deploy', requirePermission('governance.manage'), asyncRoute(async (req, res) => {
+  const input = z.object({ versionLabel: z.string().trim().min(1).max(80), reason: z.string().trim().min(1).max(500) }).parse(req.body)
+  requireP0()
+  res.json(await agentGovernance!.deploy(req.context!, String(req.params.id), input.versionLabel, input.reason))
+}))
+app.post('/api/agents/:id/suspend', requirePermission('governance.manage'), asyncRoute(async (req, res) => {
+  const input = z.object({ reason: z.string().trim().min(1).max(500) }).parse(req.body)
+  requireP0()
+  res.json(await agentGovernance!.suspend(req.context!, String(req.params.id), input.reason))
+}))
+app.post('/api/agents/:id/rollback', requirePermission('governance.manage'), asyncRoute(async (req, res) => {
+  const input = z.object({ reason: z.string().trim().min(1).max(500) }).parse(req.body)
+  requireP0()
+  res.json(await agentGovernance!.rollback(req.context!, String(req.params.id), input.reason))
+}))
+app.post('/api/agents/:id/retire', requirePermission('governance.manage'), asyncRoute(async (req, res) => {
+  const input = z.object({ reason: z.string().trim().min(1).max(500) }).parse(req.body)
+  requireP0()
+  res.json(await agentGovernance!.retire(req.context!, String(req.params.id), input.reason))
+}))
 
 app.use((_req, _res, next) => next(new AppError(404, 'NOT_FOUND', 'The requested resource was not found.')))
 app.use((error: unknown, req: Request, res: Response, _next: NextFunction) => {
