@@ -21,6 +21,7 @@ import { Scheduler } from './scheduler.js'
 import { KnowledgeHealthService } from './knowledgeHealth.js'
 import { CostService } from './cost.js'
 import { MeetingService } from './meetings.js'
+import { KnowledgeGraphService } from './knowledgeGraph.js'
 import { startSpan, extractTraceContext } from './tracing.js'
 import { Pool } from 'pg'
 import { createStore } from './store.js'
@@ -48,6 +49,7 @@ const scheduler = p0Db && killSwitch ? new Scheduler(p0Db, killSwitch) : null
 const knowledgeHealth = p0Db ? new KnowledgeHealthService(p0Db) : null
 const cost = p0Db ? new CostService(p0Db) : null
 const meetings = p0Db ? new MeetingService(p0Db) : null
+const knowledgeGraph = p0Db ? new KnowledgeGraphService(p0Db) : null
 
 const requireP0 = () => {
   if (!p0Db) throw new AppError(503, 'P0_REQUIRES_POSTGRES', 'This capability requires the PostgreSQL production backend.')
@@ -360,6 +362,37 @@ app.get('/api/meetings/intelligence/search', requirePermission('meetings.read'),
   res.json({ items: await meetings!.search(req.context!, query) })
 }))
 app.delete('/api/meetings/intelligence/:meetingId', requirePermission('meetings.manage'), asyncRoute(async (req, res) => { requireP0(); await meetings!.deleteMeeting(req.context!, String(req.params.meetingId)); res.status(204).end() }))
+
+// --- P2-A: enterprise knowledge graph ---
+const entityTypeEnum = z.enum(['person','team','department','organization','document','policy','project','customer','vendor','system','application','meeting','decision','task','agent','workflow','action','outcome','risk','control'])
+const relationshipTypeEnum = z.enum(['REPORTS_TO','MEMBER_OF','OWNS','CREATED','APPROVED','DEPENDS_ON','RELATED_TO','MENTIONED_IN','DECIDED_IN','ASSIGNED_TO','EXECUTED_BY','AFFECTS','BLOCKS','RESOLVES','GOVERNS','USES','DERIVED_FROM'])
+app.get('/api/graph/entities', requirePermission('analytics.read'), asyncRoute(async (req, res) => {
+  const type = entityTypeEnum.optional().parse(req.query.type)
+  requireP0()
+  res.json({ items: await knowledgeGraph!.listEntities(req.context!, type) })
+}))
+app.post('/api/graph/entities', requirePermission('governance.manage'), asyncRoute(async (req, res) => {
+  const input = z.object({ entityType: entityTypeEnum, name: z.string().trim().min(1).max(240), externalRef: z.string().trim().max(240).optional(), attributes: z.record(z.string(), z.unknown()).optional(), classification: z.string().max(40).optional(), provenance: z.string().max(40).optional(), confidence: z.number().min(0).max(1).optional(), validTo: z.string().optional() }).parse(req.body)
+  requireP0()
+  res.status(201).json(await knowledgeGraph!.upsertEntity(req.context!, input as Parameters<KnowledgeGraphService['upsertEntity']>[1]))
+}))
+app.post('/api/graph/relationships', requirePermission('governance.manage'), asyncRoute(async (req, res) => {
+  const input = z.object({ sourceType: entityTypeEnum, sourceName: z.string().trim().min(1).max(240), relationshipType: relationshipTypeEnum, targetType: entityTypeEnum, targetName: z.string().trim().min(1).max(240), attributes: z.record(z.string(), z.unknown()).optional(), provenance: z.string().max(40).optional(), confidence: z.number().min(0).max(1).optional() }).parse(req.body)
+  requireP0()
+  res.status(201).json(await knowledgeGraph!.linkEntities(req.context!, input as Parameters<KnowledgeGraphService['linkEntities']>[1]))
+}))
+app.get('/api/graph/relationships', requirePermission('analytics.read'), asyncRoute(async (req, res) => {
+  const entityId = z.string().max(120).optional().parse(req.query.entityId)
+  requireP0()
+  res.json({ items: await knowledgeGraph!.relationships(req.context!, entityId) })
+}))
+app.get('/api/graph/traverse/:entityId', requirePermission('analytics.read'), asyncRoute(async (req, res) => {
+  const type = relationshipTypeEnum.optional().parse(req.query.type)
+  const maxDepth = z.coerce.number().int().min(1).max(6).optional().parse(req.query.maxDepth)
+  requireP0()
+  res.json({ items: await knowledgeGraph!.traverse(req.context!, String(req.params.entityId), { relationshipType: type, maxDepth }) })
+}))
+app.delete('/api/graph/entities/:entityId', requirePermission('governance.manage'), asyncRoute(async (req, res) => { requireP0(); await knowledgeGraph!.deleteEntity(req.context!, String(req.params.entityId)); res.status(204).end() }))
 
 if (config.nodeEnv === 'production') {
   const webRoot = path.resolve(process.cwd(), 'dist')
