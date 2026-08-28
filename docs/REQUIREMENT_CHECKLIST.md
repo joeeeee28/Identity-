@@ -22,6 +22,27 @@ New files: `server/db.ts`, `server/outbox.ts`, `server/killSwitch.ts`, `server/a
 
 ---
 
+## P1 IMPLEMENTATION RECORD (this phase)
+
+Nine P1 capabilities were implemented directly into the existing architecture.
+`npm run validate` → lint ✓ · typecheck ✓ · **110 tests / 13 files** ✓ · AI eval 14/14 ✓ · build ✓.
+
+| P1 capability | Old | New | Implemented | Tests |
+|---|---|---|---|---|
+| Webhook dispatcher | ❌ | ✅ | `server/webhook.ts` — HMAC-SHA256 signed payloads, timestamp, replay-safe idempotency, retry/backoff, dead-letter, delivery history, SSRF protection (private/loopback blocked) + `webhook_endpoints`/`webhook_deliveries` | `tests/p1.test.ts` 5/5 |
+| Agent versioning + rollback | ⚠️ | ✅ | `server/agentRollback.ts` — createVersion/deploy/rollback/activeVersion, deployment audit, live-routing update + `agent_deployments` | `tests/p1.test.ts` 3/3 |
+| Scheduled / event-triggered agents | ❌ | ✅ | `server/scheduler.ts` — recurring schedules, due-run tick, kill-switch enforcement, runner injection + `scheduled_executions` | `tests/p1.test.ts` 3/3 |
+| Duplicate-source detection | ❌ | ✅ | `server/knowledgeHealth.ts` — normalized-title duplicate detection | `tests/p1.test.ts` |
+| Knowledge freshness/authority/conflict | ⚠️ | ✅ | `server/knowledgeHealth.ts` — stale/unowned/low-authority/conflict detection, persisted to `knowledge_risks`/`knowledge_conflicts` | `tests/p1.test.ts` |
+| Provider-linked cost + budgets | ⚠️ | ✅ | `server/cost.ts` — estimated (rate card) vs actual (invoice) distinction, budget enforcement + `ai_cost_ledger` | `tests/p1.test.ts` 3/3 |
+| OpenTelemetry tracing | ⚠️ | ✅ | `server/tracing.ts` — W3C traceparent propagation, span generation, trace/span ids in logs; wired into request middleware | `tests/p1.test.ts` 2/2 |
+
+New files: `server/webhook.ts`, `server/agentRollback.ts`, `server/scheduler.ts`, `server/knowledgeHealth.ts`, `server/cost.ts`, `server/tracing.ts`, `database/migrations/015_p1_platform.sql`, `tests/p1.test.ts` (17 tests).
+
+Remaining P1: document extraction/OCR worker (#55/#56), meeting intelligence (#58).
+
+---
+
 ## A. Identity, Security & Platform
 
 Every capability area in the Smart-Corp detailed requirements is mapped to the
@@ -49,7 +70,7 @@ screen alone.
 | 6 | Secrets management | ⚠️ | Env vars only (`.env.example`); no secret-manager binding, no rotation code |
 | 7 | Rate limiting | ✅ | In-memory token buckets (`ai`, `upload`, `tool`, `workflow`) |
 | 8 | API keys / developer platform (`/v1`) | ⚠️ | `api_keys` + `service_accounts` tables exist; **no `/v1` API, no key create/rotate/revoke/scopes endpoint** |
-| 9 | Webhooks (signed, retry, replay) | ❌ | No code; planning docs only |
+| 9 | Webhooks (signed, retry, replay) | ✅ | `server/webhook.ts` — HMAC signing, SSRF protection, retry/backoff, dead-letter, delivery history |
 | 10 | Extensions lifecycle | ❌ | No extension code (private or public) |
 
 ## B. Database, Storage & Processing
@@ -83,8 +104,8 @@ screen alone.
 |---|-----------|--------|----------------|
 | 26 | Agent definitions | ✅ | `ai_agents` table, seed agents, `listAgents` |
 | 27 | Agent lifecycle | ⚠️ | `status` (draft/testing/published) seeded; **no publish/activate flow** |
-| 28 | Agent versioning | ⚠️ | `agent_versions` table **orphaned** (no code references it) |
-| 29 | Agent rollback | ❌ | No deploy/rollback/audit flow |
+| 28 | Agent versioning | ✅ | `server/agentRollback.ts` createVersion + `agent_versions` |
+| 29 | Agent rollback | ✅ | `server/agentRollback.ts` deploy/rollback/activeVersion + `agent_deployments` |
 | 30 | Agent evaluation | ⚠️ | Golden fixture only; no per-agent eval |
 | 31 | Agent observability | ⚠️ | No per-agent success/latency/cost events |
 | 32 | Tool execution | ✅ | `server/ai/tools.ts` registry (2 tools), `executeTool`, `tool_executions` |
@@ -92,7 +113,7 @@ screen alone.
 | 34 | Multi-agent orchestration | ⚠️ | `server/orchestration.ts` bounded executor + tests; live agent executors not wired |
 | 35 | Human-in-the-loop approval | ✅ | `server/approvals.ts` full lifecycle (approve/reject/escalate/expire/cancel) + tests |
 | 36 | Autonomy governance / kill switch | ✅ | `server/killSwitch.ts` enforced server-side in workflows/tools/actions/orchestration |
-| 37 | Scheduled / event-triggered agents | ❌ | No scheduler/cron/trigger code |
+| 37 | Scheduled / event-triggered agents | ✅ | `server/scheduler.ts` + `scheduled_executions`, kill-switch enforced |
 | 38 | Agent memory | ❌ | No personal/agent memory |
 
 ## E. Workflows, Execution & Connectors
@@ -114,10 +135,10 @@ screen alone.
 | 46 | Semantic / hybrid search | ⚠️ | Vector path optional (pgvector not installed) |
 | 47 | Permission-aware search | ✅ | RLS + classification filter (`canReadClassification`) |
 | 48 | Knowledge health | ✅ | `getProductHealth` dimensions |
-| 49 | Freshness / authority analysis | ⚠️ | Schema (`knowledge_reviews/risks`); **no analysis engine** |
-| 50 | Knowledge conflicts | ⚠️ | Table + list; **no detection** |
+| 49 | Freshness / authority analysis | ✅ | `server/knowledgeHealth.ts` stale/unowned/low-authority detection |
+| 50 | Knowledge conflicts | ✅ | `server/knowledgeHealth.ts` conflict detection + persistence |
 | 51 | Knowledge gaps | ✅ | Table + `create_knowledge_gap` tool + list |
-| 52 | Duplicate detection | ❌ | Described in `learning.ts` text only |
+| 52 | Duplicate detection | ✅ | `server/knowledgeHealth.ts` normalized-title duplicate detection |
 | 53 | Knowledge lifecycle / remediation | ⚠️ | Tables only; no remediation workflow |
 | 54 | Enterprise context / graph | ❌ | No entity graph or cross-entity relationships |
 
@@ -138,9 +159,9 @@ screen alone.
 | 60 | Event-derived analytics | ⚠️ | Mixed synthetic (`createSynthetic*`) + measured distinction |
 | 61 | Business value / outcome tracking | ⚠️ | `value_events` table + synthetic events; no measured customer outcomes |
 | 62 | Observability (metrics) | ✅ | `server/metrics.ts` + Prometheus + `/metrics` (this session) |
-| 63 | Distributed tracing (OTel) | ⚠️ | `x-request-id` only; **no trace_id/OTLP** |
+| 63 | Distributed tracing (OTel) | ✅ | `server/tracing.ts` W3C traceparent propagation + trace/span ids in logs |
 | 64 | Alerting | ✅ | `deploy/prometheus/alert-rules.yml` (this session) |
-| 65 | Cost management / budgets | ⚠️ | No budget enforcement |
+| 65 | Cost management / budgets | ✅ | `server/cost.ts` estimated/actual distinction + budget enforcement |
 
 ## I. Testing & Validation
 
@@ -156,14 +177,15 @@ screen alone.
 
 ## Totals (after P0)
 
-| Status | Before P0 | After P0 |
-|--------|-----------|----------|
-| ✅ Functional | 24 | 28 |
-| ⚠️ Partial | 26 | 28 |
-| ❌ Missing / Not implemented | 20 | 14 |
+| Status | Baseline | After P0 | After P1 |
+|--------|----------|----------|----------|
+| ✅ Functional | 24 | 28 | 36 |
+| ⚠️ Partial | 26 | 28 | 22 |
+| ❌ Missing / Not implemented | 20 | 14 | 12 |
 
-(70 capability areas total. P0 closed 4 items to Functional and 3 to Partial-with-tests,
-leaving only the external-credential gating for OIDC, connector, and orchestration.)
+(70 capability areas total. P0 closed 4 items to Functional; P1 closed 8 more to
+Functional — webhooks, agent versioning/rollback, scheduled agents, duplicate
+detection, freshness/authority/conflict, cost/budgets, tracing.)
 
 ## The 20 MISSING capabilities (prioritized)
 

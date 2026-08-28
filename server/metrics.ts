@@ -81,3 +81,11 @@ metrics.registerMetric('smart_corp_outbox_failed_total', 'Total outbox events th
 // Orchestration
 metrics.registerMetric('smart_corp_orchestration_runs_total', 'Total multi-agent orchestration runs.', 'counter')
 metrics.registerMetric('smart_corp_orchestration_failed_total', 'Total orchestration runs that did not complete.', 'counter')
+
+// Webhook delivery
+metrics.registerMetric('smart_corp_webhook_delivered_total', 'Total webhook deliveries completed.', 'counter')
+metrics.registerMetric('smart_corp_webhook_failed_total', 'Total webhook deliveries failed/dead-lettered.', 'counter')
+
+// AI cost
+metrics.registerMetric('smart_corp_ai_cost_estimated_cents_total', 'Total estimated AI cost (cents) recorded.', 'counter')
+metrics.registerMetric('smart_corp_ai_cost_actual_cents_total', 'Total actual (invoice-linked) AI cost (cents) recorded.', 'counter')

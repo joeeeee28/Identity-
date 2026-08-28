@@ -15,6 +15,12 @@ import { ApprovalService } from './approvals.js'
 import { GovernedActionService } from './actions.js'
 import { ConnectorService } from './connector.js'
 import { IdentityService } from './identity.js'
+import { WebhookService } from './webhook.js'
+import { AgentRollbackService } from './agentRollback.js'
+import { Scheduler } from './scheduler.js'
+import { KnowledgeHealthService } from './knowledgeHealth.js'
+import { CostService } from './cost.js'
+import { startSpan, extractTraceContext } from './tracing.js'
 import { Pool } from 'pg'
 import { createStore } from './store.js'
 import { createObjectStorage } from './storage.js'
@@ -35,6 +41,11 @@ const approvals = p0Db ? new ApprovalService(p0Db) : null
 const governedActions = p0Db && approvals ? new GovernedActionService(p0Db, approvals) : null
 const connectors = p0Db ? new ConnectorService(p0Db) : null
 const identity = p0Db ? new IdentityService(p0Db) : null
+const webhooks = p0Db ? new WebhookService(p0Db) : null
+const agentRollback = p0Db ? new AgentRollbackService(p0Db) : null
+const scheduler = p0Db && killSwitch ? new Scheduler(p0Db, killSwitch) : null
+const knowledgeHealth = p0Db ? new KnowledgeHealthService(p0Db) : null
+const cost = p0Db ? new CostService(p0Db) : null
 
 const requireP0 = () => {
   if (!p0Db) throw new AppError(503, 'P0_REQUIRES_POSTGRES', 'This capability requires the PostgreSQL production backend.')
@@ -55,14 +66,17 @@ app.use(cors({ origin: config.webOrigin, credentials: true, methods: ['GET', 'PO
 app.use((req, res, next) => {
   const id = requestId(req)
   const started = Date.now()
+  const trace = startSpan(extractTraceContext(req.header('traceparent')), `http ${req.method} ${req.path}`)
   res.setHeader('x-request-id', id)
+  res.setHeader('traceparent', `00-${trace.traceId}-${trace.spanId}-${trace.sampled ? '01' : '00'}`)
   ;(req as AuthedRequest).requestId = id
+  ;(req as AuthedRequest).trace = trace
   res.on('finish', () => {
     const latencyMs = Date.now() - started
     metrics.increment('smart_corp_http_requests_total')
     metrics.observe('smart_corp_http_request_duration_seconds', latencyMs / 1000)
     if (res.statusCode >= 400) metrics.increment('smart_corp_http_errors_total')
-    logger.info('http_request', { requestId: id, method: req.method, path: req.path, statusCode: res.statusCode, latencyMs })
+    logger.info('http_request', { requestId: id, traceId: trace.traceId, spanId: trace.spanId, method: req.method, path: req.path, statusCode: res.statusCode, latencyMs })
   })
   next()
 })
@@ -86,6 +100,7 @@ app.use(express.json({ limit: '1mb', strict: true }))
 interface AuthedRequest extends Request {
   context?: TenantContext
   requestId?: string
+  trace?: import('./tracing.js').TraceContext
 }
 
 const requireAuth = async (req: AuthedRequest, _res: Response, next: NextFunction) => {
@@ -287,6 +302,47 @@ app.post('/api/orchestration/run', requirePermission('agents.execute'), asyncRou
   // then fails closed rather than fabricating agent execution.
   res.status(501).json({ error: { code: 'ORCHESTRATION_EXECUTORS_UNAVAILABLE', message: 'No agent executors are registered; orchestration is enforcement-ready but has no live agents to run.' } })
 }))
+
+// --- P1: webhooks, agent rollback, schedules, knowledge health, cost ---
+app.get('/api/webhooks', requirePermission('settings.manage'), asyncRoute(async (req, res) => { requireP0(); res.json({ items: await webhooks!.list(req.context!) }) }))
+app.post('/api/webhooks', requirePermission('settings.manage'), asyncRoute(async (req, res) => {
+  const input = z.object({ url: z.string().url().max(500), secret: z.string().min(16).max(500), events: z.array(z.string().trim().min(1).max(100)).max(50) }).parse(req.body)
+  requireP0()
+  res.status(201).json(await webhooks!.register(req.context!, input))
+}))
+
+app.post('/api/agents/:agentId/versions', requirePermission('agents.manage'), asyncRoute(async (req, res) => {
+  const input = z.object({ versionLabel: z.string().trim().min(1).max(80), modelName: z.string().trim().min(1).max(120), promptVersion: z.string().trim().max(80).optional() }).parse(req.body)
+  requireP0()
+  res.status(201).json(await agentRollback!.createVersion(req.context!, String(req.params.agentId), input.versionLabel, input.modelName, input.promptVersion))
+}))
+app.post('/api/agents/:agentId/deploy', requirePermission('agents.manage'), asyncRoute(async (req, res) => {
+  const input = z.object({ versionLabel: z.string().trim().min(1).max(80), reason: z.string().trim().max(500) }).parse(req.body)
+  requireP0()
+  res.json(await agentRollback!.deploy(req.context!, String(req.params.agentId), input.versionLabel, input.reason))
+}))
+app.post('/api/agents/:agentId/rollback', requirePermission('agents.manage'), asyncRoute(async (req, res) => {
+  const input = z.object({ reason: z.string().trim().max(500) }).parse(req.body)
+  requireP0()
+  res.json(await agentRollback!.rollback(req.context!, String(req.params.agentId), input.reason))
+}))
+app.get('/api/agents/:agentId/deployment', requirePermission('agents.read'), asyncRoute(async (req, res) => { requireP0(); res.json(await agentRollback!.activeVersion(req.context!, String(req.params.agentId))) }))
+
+app.get('/api/schedules', requirePermission('workflow.execute'), asyncRoute(async (req, res) => { requireP0(); res.json({ items: await scheduler!.list(req.context!) }) }))
+app.post('/api/schedules', requirePermission('workflow.execute'), asyncRoute(async (req, res) => {
+  const input = z.object({ agentId: z.string().max(120).optional(), workflowId: z.string().max(120).optional(), schedule: z.string().trim().min(1).max(200), intervalSeconds: z.number().int().positive().max(86400 * 30) }).parse(req.body)
+  requireP0()
+  res.status(201).json(await scheduler!.create(req.context!, input))
+}))
+app.patch('/api/schedules/:scheduleId', requirePermission('workflow.execute'), asyncRoute(async (req, res) => {
+  const input = z.object({ enabled: z.boolean() }).parse(req.body)
+  requireP0()
+  res.json(await scheduler!.setEnabled(req.context!, String(req.params.scheduleId), input.enabled))
+}))
+
+app.post('/api/knowledge-health/analyze', requirePermission('analytics.read'), asyncRoute(async (req, res) => { requireP0(); res.json({ findings: await knowledgeHealth!.analyze(req.context!) }) }))
+
+app.get('/api/cost/summary', requirePermission('analytics.read'), asyncRoute(async (req, res) => { requireP0(); res.json(await cost!.summary(req.context!)) }))
 
 if (config.nodeEnv === 'production') {
   const webRoot = path.resolve(process.cwd(), 'dist')

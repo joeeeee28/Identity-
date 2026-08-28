@@ -48,6 +48,7 @@ export const setupP0 = async (): Promise<P0Env> => {
 
   await db.exec('BEGIN')
   await db.query(`INSERT INTO organizations (id, name, slug) VALUES ($1,'Tenant A','tenant-a'),($2,'Tenant B','tenant-b')`, [TENANT_A, TENANT_B])
+  await db.query(`INSERT INTO organization_settings (tenant_id) VALUES ($1),($2)`, [TENANT_A, TENANT_B])
   for (const [tenantId, userId, email] of [[TENANT_A, USER_A, 'admin@a.test'], [TENANT_B, USER_B, 'admin@b.test']] as const) {
     await db.query(`INSERT INTO users (id, tenant_id, email, status) VALUES ($1,$2,$3,'active')`, [userId, tenantId, email])
     await db.query(`INSERT INTO user_profiles (user_id, tenant_id, display_name) VALUES ($1,$2,'Admin')`, [userId, tenantId])
