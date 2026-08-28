@@ -134,8 +134,11 @@ class GoogleProvider implements ModelProvider {
 export class ModelGateway {
   private readonly providers: Map<ModelProviderName, ModelProvider>
 
-  constructor(private readonly router = new ModelRouter()) {
-    this.providers = new Map<ModelProviderName, ModelProvider>([
+  constructor(
+    private readonly router = new ModelRouter(),
+    providers?: Map<ModelProviderName, ModelProvider>,
+  ) {
+    this.providers = providers ?? new Map<ModelProviderName, ModelProvider>([
       ['development', new DevelopmentGroundedProvider()],
       ['openai', new OpenAIProvider()],
       ['anthropic', new AnthropicProvider()],

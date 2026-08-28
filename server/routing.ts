@@ -1,4 +1,4 @@
-import { MODEL_CATALOG, type ModelProviderName } from './ai/models.js'
+import { MODEL_CATALOG, type ModelProviderName, type ModelRoute } from './ai/models.js'
 import type { IntentAnalysis, TaskType } from './ai/intent.js'
 import { AppError } from './errors.js'
 
@@ -194,4 +194,23 @@ export const routeModel = (input: RoutingInput, candidates: ModelCandidate[]): R
 export const requireRoute = (decision: RoutingDecision) => {
   if (decision.failClosed || !decision.model) throw new AppError(503, 'MODEL_POLICY_NO_MATCH', 'No approved model is available for this request under current policy.')
   return decision
+}
+
+/**
+ * Convert a governed RoutingDecision into the ModelRoute shape the gateway
+ * executes. Fallback models are constrained to the SAME provider as the selected
+ * model (the gateway invokes a single provider; cross-provider fallback is a
+ * separate, provider-layer concern). Estimated cost is carried through for
+ * telemetry/audit.
+ */
+export const decisionToRoute = (decision: RoutingDecision): ModelRoute => {
+  const sameProvider = new Set(MODEL_CATALOG.filter((profile) => profile.provider === decision.provider).map((profile) => profile.id))
+  return {
+    provider: decision.provider,
+    model: decision.model,
+    fallbackModels: decision.fallbackModels.filter((model) => sameProvider.has(model)),
+    reasoningEffort: decision.reasoningEffort,
+    rationale: decision.rationale,
+    estimatedCostPerMillionOutputUsd: decision.estimatedCostCents !== null ? decision.estimatedCostCents * 10 : null,
+  }
 }

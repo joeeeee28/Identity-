@@ -12,6 +12,9 @@ import { resolveFollowUpQuery, retrieveDevelopmentKnowledge } from './ai/retriev
 import { KillSwitchService } from './killSwitch.js'
 import { appendOutboxEvent } from './outbox.js'
 import { TenantDb, PgConnector } from './db.js'
+import { ModelRegistryService } from './modelRegistry.js'
+import { decisionToRoute, type DataClassification, type RoutingDecision } from './routing.js'
+import type { ModelRoute } from './ai/models.js'
 import { OpenAIEmbeddingProvider, vectorLiteral } from './ai/embeddings.js'
 import { WebResearchGateway } from './ai/web.js'
 import { DevelopmentStructuredDataProvider, PostgresStructuredDataProvider, renderStructuredResult } from './ai/structured.js'
@@ -65,6 +68,17 @@ const asFileSize = (bytes: number) => bytes > 1024 * 1024 ? `${(bytes / (1024 * 
 const normalize = (value: string) => value.trim().toLowerCase().replace(/\s+/g, ' ')
 const asStringArray = (value: unknown): string[] => Array.isArray(value) ? value.map(String) : []
 const isUuid = (value: string | undefined): value is string => Boolean(value && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value))
+
+const CLASSIFICATION_RANK: Record<string, number> = { Public: 0, Internal: 1, Confidential: 2, Restricted: 3, 'Highly Restricted': 4 }
+
+/** The most sensitive classification among retrieved sources, for routing privacy. */
+const highestClassification = (citations: Array<{ classification: string }>): DataClassification => {
+  let highest: DataClassification = 'Internal'
+  for (const citation of citations) {
+    if ((CLASSIFICATION_RANK[citation.classification] ?? 1) > (CLASSIFICATION_RANK[highest] ?? 1)) highest = citation.classification as DataClassification
+  }
+  return highest
+}
 
 const canReadClassification = (ctx: TenantContext, classification: string) => {
   if (classification === 'Highly Restricted') return ctx.permissions.includes('knowledge.admin') || ctx.roles.includes('org_admin') || ctx.roles.includes('security_admin')
@@ -466,13 +480,30 @@ export class PostgresStore implements Store {
   private readonly structuredData: PostgresStructuredDataProvider
   private readonly embeddings = new OpenAIEmbeddingProvider()
   private readonly killSwitch: KillSwitchService
+  private readonly modelRegistry: ModelRegistryService
   private evaluation: EvaluationSnapshot | null = null
 
   constructor() {
     if (!config.databaseUrl) throw new Error('DATABASE_URL is required for PostgresStore')
     this.pool = new Pool({ connectionString: config.databaseUrl, ssl: config.databaseSsl ? { rejectUnauthorized: false } : undefined, max: config.databasePoolSize, statement_timeout: 15_000 })
     this.killSwitch = new KillSwitchService(new TenantDb(new PgConnector(this.pool)))
+    this.modelRegistry = new ModelRegistryService(new TenantDb(new PgConnector(this.pool)))
     this.structuredData = new PostgresStructuredDataProvider(this.pool)
+  }
+
+  /**
+   * Authoritative production model selection. Resolves the governed routing
+   * decision via the tenant model registry + policy, then converts it to the
+   * gateway route. Fails closed (NO_AUTHORIZED_MODEL) when no authorized model
+   * satisfies the request — the old provider-locked ModelRouter is never used as
+   * a silent fallback.
+   */
+  private async resolveRoute(ctx: TenantContext, analysis: IntentAnalysis, classification: DataClassification): Promise<ModelRoute> {
+    const decision: RoutingDecision = await this.modelRegistry.decide(ctx, { analysis, classification })
+    if (decision.failClosed || !decision.model) {
+      throw new AppError(503, 'NO_AUTHORIZED_MODEL', decision.rationale || 'No authorized model is available for this request.')
+    }
+    return decisionToRoute(decision)
   }
 
   private async tenantQuery<T extends QueryResultRow = any>(ctx: TenantContext, text: string, values: unknown[] = []) {
@@ -714,7 +745,7 @@ export class PostgresStore implements Store {
     const structuredResult = analysis.task === 'structured_analysis' ? await this.structuredData.query(ctx, retrievalQuestion) : null
     const result = structuredResult || analysis.sourceMode === 'web' || analysis.needsClarification || analysis.risk === 'critical' || analysis.responseType === 'insufficient_evidence' ? { rows: [] } : await this.retrieveKnowledge(ctx, retrievalQuestion)
     const citations: Citation[] = result.rows.filter((row) => canReadClassification(ctx, row.classification)).map((row) => ({ id: `${row.document_id}-${row.section_label}`, documentId: row.document_id, title: row.title, section: row.section_label ?? 'Source section', page: row.page_number ?? undefined, owner: row.owner_id, updatedAt: new Date(row.updated_at).toISOString(), relevance: Number(row.combined_score ?? 0.9), classification: row.classification, excerpt: String(row.content).slice(0, 600) }))
-    const route = this.gateway.route(analysis, { highRisk: analysis.risk === 'high' || analysis.risk === 'critical', approvedModels: config.approvedModels })
+    const route = await this.resolveRoute(ctx, analysis, highestClassification(citations))
     const promptTemplate = getPromptTemplate(analysis)
     const structuredContext = structuredResult ? renderStructuredResult(structuredResult) : undefined
     const availableAgents = await this.listAgents(ctx)
