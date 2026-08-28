@@ -8,6 +8,7 @@ import { AppError } from './errors.js'
 
 export interface ObjectStorage {
   put(tenantId: string, fileName: string, content: Buffer, contentType: string): Promise<{ key: string }>
+  get(tenantId: string, key: string): Promise<Buffer>
   createDownloadUrl(tenantId: string, key: string, expiresInSeconds: number): Promise<string>
   delete(tenantId: string, key: string): Promise<void>
 }
@@ -23,6 +24,12 @@ class LocalObjectStorage implements ObjectStorage {
     await fs.mkdir(path.dirname(target), { recursive: true })
     await fs.writeFile(target, content, { flag: 'wx' })
     return { key }
+  }
+
+  async get(_tenantId: string, key: string) {
+    const target = path.join(this.root, key)
+    if (!target.startsWith(this.root + path.sep)) throw new AppError(403, 'STORAGE_KEY_INVALID', 'The storage key is not valid.')
+    return fs.readFile(target)
   }
 
   async createDownloadUrl(_tenantId: string, key: string, _expiresInSeconds: number) {
@@ -83,6 +90,12 @@ class S3ObjectStorage implements ObjectStorage {
     return getSignedUrl(this.client, new GetObjectCommand({ Bucket: this.bucket, Key: key }), { expiresIn: expiresInSeconds })
   }
 
+  async get(tenantId: string, key: string) {
+    this.assertTenantKey(tenantId, key)
+    const result = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }))
+    return Buffer.from(await result.Body!.transformToByteArray())
+  }
+
   async delete(tenantId: string, key: string) {
     this.assertTenantKey(tenantId, key)
     await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }))
@@ -91,6 +104,7 @@ class S3ObjectStorage implements ObjectStorage {
 
 class ConfiguredObjectStorage implements ObjectStorage {
   async put(_tenantId: string, _fileName: string, _content: Buffer, _contentType: string): Promise<{ key: string }> { throw new AppError(503, 'STORAGE_NOT_CONFIGURED', 'Secure object storage is not available. Contact an administrator.') }
+  async get(_tenantId: string, _key: string): Promise<Buffer> { throw new AppError(503, 'STORAGE_NOT_CONFIGURED', 'Secure object storage is not available. Contact an administrator.') }
   async createDownloadUrl(_tenantId: string, _key: string, _expiresInSeconds: number): Promise<string> { throw new AppError(503, 'STORAGE_NOT_CONFIGURED', 'Secure object storage is not available. Contact an administrator.') }
   async delete(_tenantId: string, _key: string): Promise<void> { throw new AppError(503, 'STORAGE_NOT_CONFIGURED', 'Secure object storage is not available. Contact an administrator.') }
 }

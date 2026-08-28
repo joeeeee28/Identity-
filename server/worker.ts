@@ -6,36 +6,12 @@ import { AppError } from './errors.js'
 import { newCorrelationId, PostgresJobQueue, type JobRecord } from './jobs.js'
 import { createObjectStorage } from './storage.js'
 import { createMalwareScanner } from './security.js'
+import { createIndexingProcessor } from './indexing.js'
+import { PgConnector } from './db.js'
 
 export type JobProcessor = (job: JobRecord) => Promise<void>
 
 const workerId = `worker-${process.pid}-${newCorrelationId().slice(0, 8)}`
-
-/**
- * Finalize document ingestion: transition the document from `processing` to
- * `ready` within a tenant-scoped transaction (RLS `app.tenant_id` is set so the
- * update is bound to the job's tenant). OCR / embedding enrichment stages can be
- * inserted ahead of this step without changing the durable execution contract.
- */
-export const createIngestionProcessor = (pool: Pool): JobProcessor => async (job) => {
-  const client = await pool.connect()
-  try {
-    await client.query('BEGIN')
-    await client.query(`SELECT set_config('app.tenant_id', $1, true)`, [job.tenantId])
-    const result = await client.query(
-      `UPDATE documents SET status = 'ready', updated_at = now() WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
-      [job.documentId, job.tenantId],
-    )
-    if (!result.rowCount) throw new AppError(404, 'DOCUMENT_NOT_FOUND', 'The document queued for ingestion could not be found.')
-    await client.query('COMMIT')
-    logger.info('job_ingestion_completed', { workerId, jobId: job.id, documentId: job.documentId, tenantId: job.tenantId })
-  } catch (error) {
-    await client.query('ROLLBACK')
-    throw error
-  } finally {
-    client.release()
-  }
-}
 
 /**
  * Re-scan the stored object (quarantine → scan → clean/rejected). Used by the
@@ -123,9 +99,13 @@ const main = async () => {
   if (!config.databaseUrl) throw new Error('DATABASE_URL is required to run the worker.')
   const pool = new Pool({ connectionString: config.databaseUrl, ssl: config.databaseSsl ? { rejectUnauthorized: false } : undefined, max: config.databasePoolSize, statement_timeout: 30_000 })
   const queue = new PostgresJobQueue(pool)
+  const storage = createObjectStorage()
+  const connector = new PgConnector(pool)
   const processors = {
-    ingestion: createIngestionProcessor(pool),
+    ingestion: createIndexingProcessor(connector, { storage }),
     security_scan: createSecurityScanProcessor(pool),
+    indexing: createIndexingProcessor(connector, { storage }),
+    ocr: createIndexingProcessor(connector, { storage }),
   }
   const controller = new AbortController()
   const shutdown = () => { logger.info('worker_shutdown_signal', { workerId }); controller.abort() }

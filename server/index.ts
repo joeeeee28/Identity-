@@ -20,6 +20,7 @@ import { AgentRollbackService } from './agentRollback.js'
 import { Scheduler } from './scheduler.js'
 import { KnowledgeHealthService } from './knowledgeHealth.js'
 import { CostService } from './cost.js'
+import { MeetingService } from './meetings.js'
 import { startSpan, extractTraceContext } from './tracing.js'
 import { Pool } from 'pg'
 import { createStore } from './store.js'
@@ -46,6 +47,7 @@ const agentRollback = p0Db ? new AgentRollbackService(p0Db) : null
 const scheduler = p0Db && killSwitch ? new Scheduler(p0Db, killSwitch) : null
 const knowledgeHealth = p0Db ? new KnowledgeHealthService(p0Db) : null
 const cost = p0Db ? new CostService(p0Db) : null
+const meetings = p0Db ? new MeetingService(p0Db) : null
 
 const requireP0 = () => {
   if (!p0Db) throw new AppError(503, 'P0_REQUIRES_POSTGRES', 'This capability requires the PostgreSQL production backend.')
@@ -343,6 +345,21 @@ app.patch('/api/schedules/:scheduleId', requirePermission('workflow.execute'), a
 app.post('/api/knowledge-health/analyze', requirePermission('analytics.read'), asyncRoute(async (req, res) => { requireP0(); res.json({ findings: await knowledgeHealth!.analyze(req.context!) }) }))
 
 app.get('/api/cost/summary', requirePermission('analytics.read'), asyncRoute(async (req, res) => { requireP0(); res.json(await cost!.summary(req.context!)) }))
+
+// --- P1: meeting intelligence ---
+const meetingIngestSchema = z.object({ title: z.string().trim().min(1).max(240), transcript: z.string().trim().min(1).max(200000), participants: z.array(z.string().trim().min(1).max(120)).max(100).optional(), classification: z.enum(['Public', 'Internal', 'Confidential', 'Restricted', 'Highly Restricted']).optional(), source: z.string().trim().max(120).optional() })
+app.get('/api/meetings/intelligence', requirePermission('meetings.read'), asyncRoute(async (req, res) => { requireP0(); res.json({ items: await meetings!.listMeetings(req.context!) }) }))
+app.post('/api/meetings/intelligence', requirePermission('meetings.read'), asyncRoute(async (req, res) => {
+  const input = meetingIngestSchema.parse(req.body)
+  requireP0()
+  res.status(201).json(await meetings!.ingest(req.context!, input))
+}))
+app.get('/api/meetings/intelligence/search', requirePermission('meetings.read'), asyncRoute(async (req, res) => {
+  const query = z.string().trim().max(200).parse(req.query.q ?? '')
+  requireP0()
+  res.json({ items: await meetings!.search(req.context!, query) })
+}))
+app.delete('/api/meetings/intelligence/:meetingId', requirePermission('meetings.manage'), asyncRoute(async (req, res) => { requireP0(); await meetings!.deleteMeeting(req.context!, String(req.params.meetingId)); res.status(204).end() }))
 
 if (config.nodeEnv === 'production') {
   const webRoot = path.resolve(process.cwd(), 'dist')

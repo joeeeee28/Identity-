@@ -17,8 +17,9 @@
     "db:seed": "tsx server/seed.ts",
     "worker": "tsx server/worker.ts",
     "ai:evaluate": "tsx server/evaluate.ts",
+    "intelligence:evaluate": "tsx server/intelligence-evaluate.ts",
     "phase6:evaluate": "tsx server/phase6-evaluate.ts",
-    "validate": "npm run lint && npm run typecheck && npm test && npm run ai:evaluate && npm run build"
+    "validate": "npm run lint && npm run typecheck && npm test && npm run ai:evaluate && npm run intelligence:evaluate && npm run build"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1118.0",
@@ -27,7 +28,9 @@
     "cors": "^2.8.5",
     "express": "^5.1.0",
     "lucide-react": "^0.468.0",
+    "mammoth": "^1.12.1",
     "multer": "^2.0.2",
+    "pdf-parse": "^2.4.5",
     "pg": "^8.16.3",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
