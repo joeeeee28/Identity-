@@ -1,0 +1,93 @@
+{
+  "runId": "search-eval-1787934366450",
+  "datasetVersion": "smart-corp-search-fixture-v1",
+  "corpus": {
+    "documents": 8,
+    "chunks": 12,
+    "synthetic": true,
+    "description": "Synthetic fixture corpus; graded judgments reviewed by the platform team. NOT production data."
+  },
+  "embeddingProvider": {
+    "name": "local-hash",
+    "model": "local-hash-v1",
+    "note": "Semantic metrics are NOT comparable across embedding providers."
+  },
+  "metrics": {
+    "lexical": {
+      "recallAt5": 1,
+      "precisionAt5": 0.53,
+      "mrr": 1,
+      "ndcgAt5": 0.99
+    },
+    "semantic": {
+      "recallAt5": 1,
+      "precisionAt5": 0.4,
+      "mrr": 1,
+      "ndcgAt5": 0.99
+    },
+    "hybrid": {
+      "recallAt5": 1,
+      "precisionAt5": 0.4,
+      "mrr": 1,
+      "ndcgAt5": 0.99
+    }
+  },
+  "perQueryRecallAt5": {
+    "how many days per week can employees work remotely": {
+      "lexical": 1,
+      "semantic": 1,
+      "hybrid": 1
+    },
+    "who approves international travel before booking": {
+      "lexical": 1,
+      "semantic": 1,
+      "hybrid": 1
+    },
+    "quarterly privileged access review by security operations": {
+      "lexical": 1,
+      "semantic": 1,
+      "hybrid": 1
+    },
+    "where may customer personal data be processed": {
+      "lexical": 1,
+      "semantic": 1,
+      "hybrid": 1
+    },
+    "severity one incident paging on-call engineer": {
+      "lexical": 1,
+      "semantic": 1,
+      "hybrid": 1
+    },
+    "when is payroll processed each month": {
+      "lexical": 1,
+      "semantic": 1,
+      "hybrid": 1
+    },
+    "vendor data processing agreement legal review": {
+      "lexical": 1,
+      "semantic": 1,
+      "hybrid": 1
+    },
+    "office attendance requirement for hybrid work": {
+      "lexical": 1,
+      "semantic": 1,
+      "hybrid": 1
+    },
+    "expense report submission deadline": {
+      "lexical": 1,
+      "semantic": 1,
+      "hybrid": 1
+    },
+    "multi-factor authentication requirement for admin accounts": {
+      "lexical": 1,
+      "semantic": 1,
+      "hybrid": 1
+    }
+  },
+  "graphSanity": {
+    "found": true,
+    "provenance": null
+  },
+  "tenantIsolationHolds": true,
+  "completedAt": "2026-08-28T16:26:06.450Z"
+}

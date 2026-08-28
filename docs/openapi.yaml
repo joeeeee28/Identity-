@@ -37,11 +37,32 @@ paths:
         '200': { description: Overview snapshot }
   /api/search:
     get:
-      summary: Search authorized enterprise resources
+      summary: P2-E unified search over authorized enterprise knowledge
+      description: Mode-aware hybrid/semantic/lexical/graph retrieval with per-kind authorization, classification gating, facets, pagination and per-result ranking explanations. Degrades explicitly (degradedReason) when semantic retrieval cannot run.
       parameters:
-        - { name: q, in: query, required: true, schema: { type: string, minLength: 2, maxLength: 160 } }
+        - { name: q, in: query, required: true, schema: { type: string, minLength: 2, maxLength: 500 } }
+        - { name: mode, in: query, schema: { type: string, enum: [auto, lexical, semantic, hybrid, graph] } }
+        - { name: kinds, in: query, schema: { type: string, description: Comma list of document, meeting, agent, workflow, graph, memory } }
+        - { name: classifications, in: query, schema: { type: string } }
+        - { name: departments, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 50 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0 } }
+        - { name: maxHops, in: query, schema: { type: integer, minimum: 1, maximum: 3 } }
       responses:
-        '200': { description: Universal search results }
+        '200': { description: Unified search response with items, facets, total, resolvedMode, factors and warnings }
+  /api/search/suggest:
+    get:
+      summary: Tenant-scoped search suggestions
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string, minLength: 2, maxLength: 200 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 20 } }
+      responses:
+        '200': { description: Suggestion texts with source labels }
+  /api/search/embeddings/backfill:
+    post:
+      summary: Queue embedding jobs for chunks missing the active model (settings.manage)
+      responses:
+        '202': { description: Backfill queued; returns queued document count }
   /api/intelligence/alerts:
     get:
       summary: Get evidence-backed proactive intelligence alerts

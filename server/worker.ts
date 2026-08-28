@@ -6,8 +6,9 @@ import { AppError } from './errors.js'
 import { newCorrelationId, PostgresJobQueue, type JobRecord } from './jobs.js'
 import { createObjectStorage } from './storage.js'
 import { createMalwareScanner } from './security.js'
-import { createIndexingProcessor } from './indexing.js'
-import { PgConnector } from './db.js'
+import { createIndexingProcessor, createEmbeddingProcessor } from './indexing.js'
+import { PgConnector, TenantDb } from './db.js'
+import { createEmbeddingProvider } from './ai/embeddings.js'
 
 export type JobProcessor = (job: JobRecord) => Promise<void>
 
@@ -106,6 +107,9 @@ const main = async () => {
     security_scan: createSecurityScanProcessor(pool),
     indexing: createIndexingProcessor(connector, { storage }),
     ocr: createIndexingProcessor(connector, { storage }),
+    // P2-E: embeddings make indexed chunks semantically searchable.
+    embedding: createEmbeddingProcessor(connector, createEmbeddingProvider(new TenantDb(connector))),
+    reindex: createEmbeddingProcessor(connector, createEmbeddingProvider(new TenantDb(connector))),
   }
   const controller = new AbortController()
   const shutdown = () => { logger.info('worker_shutdown_signal', { workerId }); controller.abort() }

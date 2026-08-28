@@ -46,6 +46,7 @@ npm run build
 npm run validate
 npm run ai:evaluate
 npm run phase6:evaluate
+npm run search:evaluate
 npm run db:migrate
 ```
 
@@ -60,8 +61,12 @@ src/                         React application, design system and views
 server/
   index.ts                   Express API, request IDs, security headers and rate limits
   store.ts                   Store contract, development adapter and PostgreSQL adapter
+  search.ts                  P2-E unified search service (modes, ACL, rerank, facets, events)
   ai/                        intent, retrieval, routing, prompts, evaluation and data providers
   ai/gateway.ts              model-provider boundary and grounded prompt construction
+  ai/embeddings.ts           P2-E embedding providers (OpenAI external / deterministic local) + tenant cache
+  ai/rerank.ts               P2-E deterministic multi-signal reranker with per-signal explanations
+  searchEvaluate.ts          P2-E retrieval-quality evaluation runner (Recall/MRR/nDCG per mode)
   storage.ts                 object-storage boundary with local development adapter
   developmentSeed.ts         development-only tenant fixtures
   evaluate.ts                reproducible golden-set evaluation runner
@@ -93,6 +98,7 @@ docs/                        audit, competitive research, model protocol, archit
 - **Phase 7 platform strategy:** [docs/PHASE7_STRATEGIC_PLATFORM_EVOLUTION.md](docs/PHASE7_STRATEGIC_PLATFORM_EVOLUTION.md) records the evidence-based decision to evolve toward a governed enterprise intelligence platform, with ContextEnvelope/evidence contracts first and graph, marketplace and broader ecosystem work gated by customer proof.
 - **Phase 8 operating intelligence:** [docs/PHASE8_ENTERPRISE_INTELLIGENCE_OPERATING_SYSTEM.md](docs/PHASE8_ENTERPRISE_INTELLIGENCE_OPERATING_SYSTEM.md) adds a narrow Sense → Understand → Reason → Decide → Act → Measure → Learn vertical slice. Signals are prioritized, context is explicit, decisions require human approval, actions reuse governed workflows, outcomes are recorded, and operating-intelligence failures are isolated from the employee core.
 - **Phase 9 value intelligence:** [docs/PHASE9_ENTERPRISE_VALUE_INTELLIGENCE.md](docs/PHASE9_ENTERPRISE_VALUE_INTELLIGENCE.md) adds value-event contracts and a customer-facing value dashboard that explicitly separates AI activity, measured outcomes, estimates, projections, cost and ROI evidence.
+- **P2-E search & retrieval intelligence:** one permission-aware search pipeline behind `/api/search` and the RAG retriever: chunk-level lexical index with OR term semantics, semantic retrieval (pgvector fast path, portable jsonb-cosine fallback), tenant-scoped embedding cache, deterministic multi-signal reranking with per-result explanations, GraphRAG context from the governed knowledge graph, ACL-authorized memory integration, cost-metered external embeddings with explicit budget degradation, `search_events` observability, an embedding worker stage (upload → scan → extract → chunk → embed → searchable) and a full Search UI. Retrieval quality is measured per mode by `npm run search:evaluate` over a versioned synthetic fixture corpus. See [docs/P2E_SEARCH_INTELLIGENCE.md](docs/P2E_SEARCH_INTELLIGENCE.md).
 - **Production gate:** [docs/PRODUCTION_DEPLOYMENT_GATE.md](docs/PRODUCTION_DEPLOYMENT_GATE.md) records the current deployment evidence, environment blockers and entry criteria for a real staging/production rollout. The Arena preview is development-only.
 
 ## API surface
@@ -106,7 +112,9 @@ All `/api` routes require an authenticated session except logout. Errors use `{ 
 | GET | `/metrics` | Basic operational metrics |
 | GET | `/api/auth/session` | Current identity and tenant context |
 | GET | `/api/dashboard/overview` | Tenant intelligence overview |
-| GET | `/api/search?q=` | Permission-aware universal search |
+| GET | `/api/search?q=` | P2-E unified search: modes (`auto`/`lexical`/`semantic`/`hybrid`/`graph`), category + classification filters, pagination, facets, per-result ranking explanations, honest degradation |
+| GET | `/api/search/suggest?q=` | Tenant-scoped type-ahead suggestions (titles, entities, own recent queries) |
+| POST | `/api/search/embeddings/backfill` | Queue idempotent embedding jobs for chunks missing the active model (`settings.manage`) |
 | GET | `/api/intelligence/alerts` | Evidence-backed proactive intelligence alerts |
 | PATCH | `/api/intelligence/alerts/:id` | Dismiss or snooze a proactive alert |
 | GET | `/api/readiness` | Tenant launch-readiness checks |

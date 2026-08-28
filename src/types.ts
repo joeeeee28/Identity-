@@ -15,6 +15,15 @@ export interface SessionUser {
 export interface Metric { label: string; value: string; detail: string; trend: number; tone: 'violet' | 'teal' | 'amber' | 'blue' | 'rose'; icon: string }
 export interface SearchResult { id: string; kind: 'document' | 'meeting' | 'agent' | 'workflow' | 'audit'; title: string; description: string; resource: string; classification?: Classification; updatedAt: string; score: number }
 export interface SearchResponse { query: string; items: SearchResult[]; total: number }
+
+// P2-E unified search
+export type UnifiedSearchMode = 'auto' | 'lexical' | 'semantic' | 'hybrid' | 'graph'
+export type UnifiedSearchKind = 'document' | 'meeting' | 'agent' | 'workflow' | 'graph' | 'memory'
+export interface SearchScoreFactors { semantic: number | null; lexical: number | null; phrase: number | null; title: number | null; authority: number | null; freshness: number | null; conflictPenalty: number; total: number; matchedTerms: string[] }
+export interface UnifiedSearchItem { id: string; kind: UnifiedSearchKind; title: string; snippet: string; resource: string; classification: Classification; updatedAt: string; score: number; documentId?: string; section?: string | null; page?: number | null; provenance?: string; factors: SearchScoreFactors }
+export interface SearchFacets { kinds: Record<string, number>; classifications: Record<string, number> }
+export interface UnifiedSearchResponse { query: string; requestedMode: UnifiedSearchMode; resolvedMode: Exclude<UnifiedSearchMode, 'auto'>; items: UnifiedSearchItem[]; total: number; offset: number; limit: number; facets: SearchFacets; tookMs: number; embeddingCacheHit: boolean; degradedReason?: string; warnings: string[] }
+export interface SearchSuggestion { text: string; source: 'document' | 'graph' | 'meeting' | 'recent' }
 export interface ProactiveAlert { id: string; title: string; description: string; severity: 'high' | 'medium' | 'low'; kind: 'expiry' | 'conflict' | 'gap' | 'trend' | 'approval'; source: string; actionLabel: string; createdAt: string }
 export interface ReadinessCheck { id: string; category: 'Identity' | 'Knowledge' | 'AI' | 'Security' | 'Operations'; label: string; status: 'ready' | 'warning' | 'blocked'; detail: string; actionLabel: string }
 export interface ReadinessSnapshot { status: 'READY' | 'READY_WITH_WARNINGS' | 'NOT_READY'; organizationName: string; checks: ReadinessCheck[]; nextSteps: string[]; evaluatedAt: string }

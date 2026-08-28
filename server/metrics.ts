@@ -104,3 +104,14 @@ metrics.registerMetric('smart_corp_routing_fallback_total', 'Total routing decis
 // Agent governance
 metrics.registerMetric('smart_corp_agent_created_total', 'Total agents registered.', 'counter')
 metrics.registerMetric('smart_corp_agent_denied_total', 'Total agent executions denied by governance.', 'counter')
+
+// Search / retrieval intelligence (P2-E)
+metrics.registerMetric('smart_corp_search_queries_total', 'Total unified search queries executed.', 'counter')
+metrics.registerMetric('smart_corp_search_acl_filtered_total', 'Search candidates removed by classification/ACL filtering.', 'counter')
+metrics.registerMetric('smart_corp_search_degraded_total', 'Search queries that degraded to a weaker retrieval mode.', 'counter')
+metrics.registerMetric('smart_corp_search_duration_seconds', 'Unified search latency.', 'histogram')
+metrics.registerMetric('smart_corp_embedding_calls_total', 'Total embedding computations requested from providers.', 'counter')
+metrics.registerMetric('smart_corp_embedding_cache_hits_total', 'Total embedding cache hits (LRU or durable).', 'counter')
+metrics.registerMetric('smart_corp_embedding_rejected_total', 'Embedding calls rejected by the cost/budget guard.', 'counter')
+metrics.registerMetric('smart_corp_graph_context_total', 'Total GraphRAG context traversals attached to retrieval.', 'counter')
+metrics.registerMetric('smart_corp_memory_context_total', 'Total governed memories attached to retrieval context.', 'counter')

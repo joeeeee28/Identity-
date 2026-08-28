@@ -12,10 +12,17 @@ import { resolveFollowUpQuery, retrieveDevelopmentKnowledge } from './ai/retriev
 import { KillSwitchService } from './killSwitch.js'
 import { appendOutboxEvent } from './outbox.js'
 import { TenantDb, PgConnector } from './db.js'
+import { metrics } from './metrics.js'
 import { ModelRegistryService } from './modelRegistry.js'
 import { decisionToRoute, type DataClassification, type RoutingDecision } from './routing.js'
 import type { ModelRoute } from './ai/models.js'
-import { OpenAIEmbeddingProvider, vectorLiteral } from './ai/embeddings.js'
+import { vectorLiteral, createEmbeddingProvider, cosineSimilarity, LocalHashEmbeddingProvider, type EmbeddingProvider } from './ai/embeddings.js'
+import { rerank as rerankCandidates, tokenizeForSearch, tsQueryOr } from './ai/rerank.js'
+import { KnowledgeGraphService } from './knowledgeGraph.js'
+import { MemoryService, renderMemoryAsEvidence } from './memory.js'
+import { SearchService } from './search.js'
+import { CostService } from './cost.js'
+import { canReadClassification, UNIFIED_SEARCH_KIND_PERMISSION } from './security.js'
 import { WebResearchGateway } from './ai/web.js'
 import { DevelopmentStructuredDataProvider, PostgresStructuredDataProvider, renderStructuredResult } from './ai/structured.js'
 import { runEvaluation as executeEvaluation } from './ai/evaluation.js'
@@ -57,9 +64,12 @@ import type {
   ProductHealthSnapshot,
   ProactiveAlert,
   ReadinessSnapshot,
-  SearchResponse,
-  SearchResult,
+  SearchFacets,
   ToolExecutionResult,
+  UnifiedSearchInput,
+  UnifiedSearchItem,
+  UnifiedSearchKind,
+  UnifiedSearchResponse,
 } from './types.js'
 
 const nowIso = () => new Date().toISOString()
@@ -80,16 +90,14 @@ const highestClassification = (citations: Array<{ classification: string }>): Da
   return highest
 }
 
-const canReadClassification = (ctx: TenantContext, classification: string) => {
-  if (classification === 'Highly Restricted') return ctx.permissions.includes('knowledge.admin') || ctx.roles.includes('org_admin') || ctx.roles.includes('security_admin')
-  if (classification === 'Restricted') return ctx.permissions.includes('knowledge.read')
-  return ctx.permissions.includes('knowledge.read')
-}
+
 
 const emptySession = (token: string): SessionRecord | null => token === 'dev-session' ? {
   sessionId: 'dev-session', tenantId: DEV_TENANT_ID, userId: DEV_USER_ID, email: devUser.email, displayName: devUser.displayName,
   departmentId: devUser.departmentId, roles: devUser.roles, permissions: devUser.permissions, expiresAt: '2099-01-01T00:00:00.000Z',
 } : null
+
+const UNIFIED_KIND_PERMISSION = Object.entries(UNIFIED_SEARCH_KIND_PERMISSION).map(([kind, permission]) => ({ kind: kind as UnifiedSearchKind, permission }))
 
 export class DevelopmentStore implements Store {
   private readonly gateway = new ModelGateway()
@@ -148,21 +156,90 @@ export class DevelopmentStore implements Store {
     return overview
   }
 
-  async search(ctx: TenantContext, query: string): Promise<SearchResponse> {
+  async search(ctx: TenantContext, query: string, options: Omit<UnifiedSearchInput, 'query'> = {}): Promise<UnifiedSearchResponse> {
+    this.assertTenant(ctx)
+    const started = Date.now()
+    const normalized = normalize(query)
+    if (normalized.length < 2) return { query, requestedMode: options.mode ?? 'auto', resolvedMode: 'lexical', items: [], total: 0, offset: options.offset ?? 0, limit: options.limit ?? 10, facets: { kinds: {}, classifications: {} }, tookMs: Date.now() - started, embeddingCacheHit: false, warnings: [] }
+    const requestedMode = options.mode ?? 'auto'
+    const wantedKinds = options.kinds?.length ? options.kinds : ['document', 'meeting', 'agent', 'workflow'] as UnifiedSearchKind[]
+    const hasPermission = (permission: string) => ctx.roles.includes('org_admin') || ctx.permissions.includes(permission)
+    const kinds = UNIFIED_KIND_PERMISSION.filter((entry) => wantedKinds.includes(entry.kind) && hasPermission(entry.permission)).map((entry) => entry.kind)
+    const warnings: string[] = []
+    let degradedReason: string | undefined
+    let resolvedMode: UnifiedSearchResponse['resolvedMode'] = requestedMode === 'auto' ? 'hybrid' : requestedMode
+    if (requestedMode === 'graph') {
+      warnings.push('Graph mode requires the PostgreSQL governed knowledge graph; the development adapter returned lexical/hybrid results only.')
+      degradedReason = 'graph_requires_postgres'
+      resolvedMode = 'hybrid'
+    }
+    if (!kinds.length) {
+      return { query, requestedMode, resolvedMode, items: [], total: 0, offset: options.offset ?? 0, limit: options.limit ?? 10, facets: { kinds: {}, classifications: {} }, tookMs: Date.now() - started, embeddingCacheHit: false, warnings: ['No searchable categories are permitted by your permissions.'] }
+    }
+
+    // Deterministic local vectorization for the semantic signal (development adapter).
+    const provider = new LocalHashEmbeddingProvider()
+    const queryVector = await provider.embed(query)
+    interface DevCandidate { id: string; kind: UnifiedSearchKind; title: string; content: string; snippet: string; classification: UnifiedSearchItem['classification']; updatedAt: string; resource: string; documentId?: string }
+    const candidates: DevCandidate[] = []
+    if (kinds.includes('document')) {
+      for (const document of this.documents) {
+        if (document.status === 'failed' || !canReadClassification(ctx, document.classification)) continue
+        if (options.classifications?.length && !options.classifications.includes(document.classification)) continue
+        candidates.push({ id: document.id, kind: 'document', title: document.title, content: [document.title, document.source, document.department, document.owner, ...document.tags].join(' '), snippet: `${document.department} · ${document.version} · ${document.source}`, classification: document.classification, updatedAt: document.updatedAt, resource: `document/${document.id}`, documentId: document.id })
+      }
+    }
+    if (kinds.includes('meeting')) {
+      for (const meeting of this.meetings) candidates.push({ id: meeting.id, kind: 'meeting', title: meeting.title, content: `${meeting.title} ${meeting.meta}`, snippet: `${meeting.meta} · ${meeting.status}`, classification: 'Internal', updatedAt: new Date().toISOString(), resource: `meeting/${meeting.id}` })
+    }
+    if (kinds.includes('agent')) {
+      for (const agent of this.agents) candidates.push({ id: agent.id, kind: 'agent', title: agent.name, content: `${agent.name} ${agent.description} ${agent.category}`, snippet: `${agent.category} · ${agent.description}`, classification: 'Internal', updatedAt: agent.lastUpdated, resource: `agent/${agent.id}` })
+    }
+    if (kinds.includes('workflow')) {
+      for (const workflow of this.workflows) candidates.push({ id: workflow.id, kind: 'workflow', title: workflow.name, content: `${workflow.name} ${workflow.description}`, snippet: `${workflow.trigger} · ${workflow.status}`, classification: 'Internal', updatedAt: workflow.lastRun, resource: `workflow/${workflow.id}` })
+    }
+
+    // Semantic signal for the hybrid/semantic modes (local deterministic provider).
+    const semanticById = new Map<string, number>()
+    if (queryVector && candidates.length && (resolvedMode === 'hybrid' || resolvedMode === 'semantic')) {
+      const vectors = await provider.embedBatch(candidates.map((candidate) => candidate.content))
+      vectors.forEach((vector, index) => { if (vector) semanticById.set(candidates[index].id, Math.max(0, cosineSimilarity(queryVector, vector))) })
+    } else if (resolvedMode === 'semantic') {
+      warnings.push('Local deterministic vectorization (lexical-overlap semantics) is in use in the development adapter; configure an external embedding provider for full semantic search.')
+    }
+
+    const ranked = rerankCandidates(query, candidates.map((candidate) => ({ id: candidate.id, title: candidate.title, content: candidate.content, semantic: semanticById.get(candidate.id) ?? null, documentId: candidate.documentId, classification: candidate.classification, updatedAt: candidate.updatedAt, sourceKind: candidate.kind })), { mode: resolvedMode === 'semantic' ? 'semantic' : resolvedMode === 'lexical' ? 'lexical' : 'hybrid', semanticAvailable: semanticById.size > 0, maxPerDocument: 4 })
+    const idToCandidate = new Map(candidates.map((candidate) => [candidate.id, candidate]))
+    const allItems: UnifiedSearchItem[] = ranked.map(({ candidate, score, contributions, factors }) => {
+      const original = idToCandidate.get(candidate.id)!
+      const round = (value: number) => Math.round(value * 10000) / 10000
+      return {
+        id: original.id, kind: original.kind, title: original.title, snippet: original.snippet, resource: original.resource,
+        classification: original.classification, updatedAt: original.updatedAt, documentId: original.documentId,
+        score: round(score),
+        factors: { semantic: round(contributions.semantic), lexical: round(contributions.lexical), phrase: round(contributions.phrase), title: round(contributions.title), authority: round(contributions.authority), freshness: round(contributions.freshness), conflictPenalty: round(contributions.conflictPenalty), total: round(score), matchedTerms: factors.matchedTerms },
+      }
+    })
+    const facets: SearchFacets = { kinds: {}, classifications: {} }
+    for (const item of allItems) { facets.kinds[item.kind] = (facets.kinds[item.kind] ?? 0) + 1; facets.classifications[item.classification] = (facets.classifications[item.classification] ?? 0) + 1 }
+    const offset = options.offset ?? 0
+    const limit = Math.max(1, Math.min(options.limit ?? 10, config.searchMaxLimit))
+    const items = allItems.slice(offset, offset + limit)
+    const searchEvent: LearningEvent = { id: `search-${makeId('event')}`, tenantId: ctx.tenantId, userId: ctx.userId, department: ctx.departmentId, kind: 'search', createdAt: nowIso(), provenance: 'development_observed', outcome: items.length ? 'success' : 'failure', failureCategory: items.length ? undefined : 'Retrieval failure', metadata: { resultCount: items.length, queryLength: query.length, mode: resolvedMode } }
+    this.learningEvents = [searchEvent, ...this.learningEvents].slice(0, 2000)
+    return { query, requestedMode, resolvedMode, items, total: allItems.length, offset, limit, facets, tookMs: Date.now() - started, embeddingCacheHit: false, degradedReason, warnings }
+  }
+
+  async searchSuggest(ctx: TenantContext, query: string, limit = 8): Promise<Array<{ text: string; source: 'document' | 'graph' | 'meeting' | 'recent' }>> {
     this.assertTenant(ctx)
     const normalized = normalize(query)
-    if (normalized.length < 2) return { query, items: [], total: 0 }
-    const score = (value: string) => { const haystack = value.toLowerCase(); const exact = haystack.includes(normalized) ? .6 : 0; const overlap = normalized.split(' ').filter((term) => term.length > 2 && haystack.includes(term)).length; return Math.min(.99, exact + overlap * .12 + .12) }
-    const results: SearchResult[] = [
-      ...this.documents.filter((document) => document.status !== 'failed' && canReadClassification(ctx, document.classification)).map((document) => ({ id: document.id, kind: 'document' as const, title: document.title, description: `${document.department} · ${document.version} · ${document.source}`, resource: `document/${document.id}`, classification: document.classification, updatedAt: document.updatedAt, score: score([document.title, document.source, ...document.tags].join(' ')) })),
-      ...this.meetings.map((meeting) => ({ id: meeting.id, kind: 'meeting' as const, title: meeting.title, description: `${meeting.meta} · ${meeting.status}`, resource: `meeting/${meeting.id}`, updatedAt: new Date().toISOString(), score: score(`${meeting.title} ${meeting.meta}`) })),
-      ...this.agents.map((agent) => ({ id: agent.id, kind: 'agent' as const, title: agent.name, description: `${agent.category} · ${agent.description}`, resource: `agent/${agent.id}`, updatedAt: agent.lastUpdated, score: score(`${agent.name} ${agent.description}`) })),
-      ...this.workflows.map((workflow) => ({ id: workflow.id, kind: 'workflow' as const, title: workflow.name, description: `${workflow.trigger} · ${workflow.status}`, resource: `workflow/${workflow.id}`, updatedAt: workflow.lastRun, score: score(`${workflow.name} ${workflow.description}`) })),
-      ...this.audit.map((event) => ({ id: event.id, kind: 'audit' as const, title: event.eventType.replaceAll('_', ' '), description: event.description, resource: event.resource, updatedAt: event.timestamp, score: score(`${event.eventType} ${event.description} ${event.resource}`) })),
-    ].filter((result) => result.score > .12).sort((left, right) => right.score - left.score).slice(0, 12)
-    const searchEvent: LearningEvent = { id: `search-${makeId('event')}`, tenantId: ctx.tenantId, userId: ctx.userId, department: ctx.departmentId, kind: 'search', createdAt: nowIso(), provenance: 'development_observed', outcome: results.length ? 'success' : 'failure', failureCategory: results.length ? undefined : 'Retrieval failure', metadata: { resultCount: results.length, queryLength: query.length } }
-    this.learningEvents = [searchEvent, ...this.learningEvents].slice(0, 2000)
-    return { query, items: results, total: results.length }
+    if (normalized.length < 2) return []
+    const matches = (value: string) => normalize(value).includes(normalized)
+    const suggestions: Array<{ text: string; source: 'document' | 'graph' | 'meeting' | 'recent' }> = []
+    for (const document of this.documents.filter((item) => matches(item.title) && item.status !== 'failed').slice(0, limit)) suggestions.push({ text: document.title, source: 'document' })
+    for (const meeting of this.meetings.filter((item) => matches(item.title)).slice(0, limit)) suggestions.push({ text: meeting.title, source: 'meeting' })
+    for (const agent of this.agents.filter((item) => matches(item.name)).slice(0, limit)) suggestions.push({ text: agent.name, source: 'graph' })
+    return suggestions.slice(0, Math.max(1, Math.min(limit, 20)))
   }
 
   async listProactiveAlerts(ctx: TenantContext): Promise<ProactiveAlert[]> {
@@ -474,21 +551,51 @@ const rowDocument = (row: QueryResultRow): DocumentRecord => ({
   id: String(row.id), title: String(row.title), source: String(row.source_name ?? 'Workspace'), owner: String(row.owner_name ?? 'Unassigned'), department: String(row.department_name ?? 'Organization'), classification: row.classification, status: row.status, pages: Number(row.page_count ?? 0), chunks: Number(row.chunk_count ?? 0), version: String(row.version_label ?? 'v1.0'), updatedAt: new Date(row.updated_at).toISOString(), nextReview: new Date(row.next_review_at ?? row.updated_at).toISOString(), trust: Number(row.trust_score ?? 0), fileSize: String(row.file_size_label ?? '—'), fileType: String(row.file_type ?? 'FILE'), tags: Array.isArray(row.tags) ? row.tags : [],
 })
 
+export interface RetrievedChunk {
+  chunkId: string
+  documentId: string
+  title: string
+  classification: import('./types.js').Classification
+  section: string | null
+  page: number | null
+  content: string
+  score: number
+  updatedAt: string
+  owner: string
+}
+
 export class PostgresStore implements Store {
   private readonly pool: Pool
+  private readonly tenantDb: TenantDb
   private readonly gateway = new ModelGateway()
   private readonly structuredData: PostgresStructuredDataProvider
-  private readonly embeddings = new OpenAIEmbeddingProvider()
+  private readonly embeddings: EmbeddingProvider
+  private readonly graph: KnowledgeGraphService
+  private readonly memory: MemoryService
   private readonly killSwitch: KillSwitchService
   private readonly modelRegistry: ModelRegistryService
+  private readonly searchService: SearchService
   private evaluation: EvaluationSnapshot | null = null
 
   constructor() {
     if (!config.databaseUrl) throw new Error('DATABASE_URL is required for PostgresStore')
     this.pool = new Pool({ connectionString: config.databaseUrl, ssl: config.databaseSsl ? { rejectUnauthorized: false } : undefined, max: config.databasePoolSize, statement_timeout: 15_000 })
+    this.tenantDb = new TenantDb(new PgConnector(this.pool))
+    this.embeddings = createEmbeddingProvider(this.tenantDb)
+    this.graph = new KnowledgeGraphService(this.tenantDb)
+    this.memory = new MemoryService(this.tenantDb, this.graph)
     this.killSwitch = new KillSwitchService(new TenantDb(new PgConnector(this.pool)))
     this.modelRegistry = new ModelRegistryService(new TenantDb(new PgConnector(this.pool)))
     this.structuredData = new PostgresStructuredDataProvider(this.pool)
+    this.searchService = new SearchService(this.tenantDb, { embeddings: this.embeddings, graph: this.graph, memory: this.memory, cost: new CostService(this.tenantDb) })
+  }
+
+  async search(ctx: TenantContext, query: string, options: Omit<UnifiedSearchInput, 'query'> = {}): Promise<UnifiedSearchResponse> {
+    return this.searchService.search(ctx, { ...options, query })
+  }
+
+  async searchSuggest(ctx: TenantContext, query: string, limit = 8) {
+    return this.searchService.suggest(ctx, query, limit)
   }
 
   /**
@@ -612,29 +719,6 @@ export class PostgresStore implements Store {
     }
   }
 
-  async search(ctx: TenantContext, query: string): Promise<SearchResponse> {
-    const normalized = query.trim()
-    if (normalized.length < 2) return { query, items: [], total: 0 }
-    const like = `%${normalized}%`
-    const [documents, meetings, agents, workflows, audit] = await Promise.all([
-      this.tenantQuery(ctx, `SELECT id, title, source_name, classification, updated_at FROM documents WHERE tenant_id = $1 AND deleted_at IS NULL AND status <> 'failed' AND (title ILIKE $2 OR source_name ILIKE $2) ORDER BY updated_at DESC LIMIT 5`, [ctx.tenantId, like]),
-      this.tenantQuery(ctx, `SELECT id, title, status, created_at FROM meetings WHERE tenant_id = $1 AND (title ILIKE $2 OR source ILIKE $2) ORDER BY created_at DESC LIMIT 5`, [ctx.tenantId, like]),
-      this.tenantQuery(ctx, `SELECT id, name, category, description, status, updated_at FROM ai_agents WHERE tenant_id = $1 AND deleted_at IS NULL AND (name ILIKE $2 OR description ILIKE $2) ORDER BY updated_at DESC LIMIT 5`, [ctx.tenantId, like]),
-      this.tenantQuery(ctx, `SELECT id, name, trigger_label, status, updated_at FROM workflows WHERE tenant_id = $1 AND deleted_at IS NULL AND (name ILIKE $2 OR description ILIKE $2) ORDER BY updated_at DESC LIMIT 5`, [ctx.tenantId, like]),
-      this.tenantQuery(ctx, `SELECT id, event_type, description, resource_ref, created_at FROM audit_events WHERE tenant_id = $1 AND (event_type ILIKE $2 OR description ILIKE $2 OR resource_ref ILIKE $2) ORDER BY created_at DESC LIMIT 5`, [ctx.tenantId, like]),
-    ])
-    const items: SearchResult[] = [
-      ...documents.rows.map((row) => ({ id: row.id, kind: 'document' as const, title: row.title, description: row.source_name, resource: `document/${row.id}`, classification: row.classification, updatedAt: new Date(row.updated_at).toISOString(), score: .8 })),
-      ...meetings.rows.map((row) => ({ id: row.id, kind: 'meeting' as const, title: row.title, description: row.status, resource: `meeting/${row.id}`, updatedAt: new Date(row.created_at).toISOString(), score: .75 })),
-      ...agents.rows.map((row) => ({ id: row.id, kind: 'agent' as const, title: row.name, description: `${row.category} · ${row.status}`, resource: `agent/${row.id}`, updatedAt: new Date(row.updated_at).toISOString(), score: .72 })),
-      ...workflows.rows.map((row) => ({ id: row.id, kind: 'workflow' as const, title: row.name, description: `${row.trigger_label} · ${row.status}`, resource: `workflow/${row.id}`, updatedAt: new Date(row.updated_at).toISOString(), score: .7 })),
-      ...audit.rows.map((row) => ({ id: row.id, kind: 'audit' as const, title: String(row.event_type).replaceAll('_', ' '), description: row.description, resource: row.resource_ref, updatedAt: new Date(row.created_at).toISOString(), score: .6 })),
-    ]
-    const rankedItems = items.sort((left, right) => right.score - left.score).slice(0, 20)
-    await this.tenantQuery(ctx, `INSERT INTO ai_observation_events (tenant_id, user_id, department, kind, provenance, outcome, failure_category, metadata) VALUES ($1, $2, $3, 'search', 'production_observed', $4, $5, $6)`, [ctx.tenantId, ctx.userId, ctx.departmentId, rankedItems.length ? 'success' : 'failure', rankedItems.length ? null : 'Retrieval failure', JSON.stringify({ resultCount: rankedItems.length, queryLength: normalized.length })])
-    return { query, items: rankedItems, total: items.length }
-  }
-
   async listProactiveAlerts(ctx: TenantContext): Promise<ProactiveAlert[]> {
     const [reviews, risks, approvals, states] = await Promise.all([
       this.tenantQuery(ctx, `SELECT id, title, next_review_at, status FROM documents WHERE tenant_id = $1 AND deleted_at IS NULL AND next_review_at <= now() + interval '14 days' ORDER BY next_review_at LIMIT 6`, [ctx.tenantId]),
@@ -721,17 +805,117 @@ export class PostgresStore implements Store {
     } catch (error) { await client.query('ROLLBACK'); throw error } finally { client.release() }
   }
 
-  private async retrieveKnowledge(ctx: TenantContext, question: string) {
-    const embedding = await this.embeddings.embed(question)
+  /**
+   * P2-E retrieval: over-fetch lexical + semantic candidates, merge, then
+   * rerank deterministically (semantic cosine, lexical overlap, authority,
+   * freshness, conflict penalty) before the evidence is capped for the prompt.
+   * Classification ACL is enforced BEFORE anything can become a citation.
+   */
+  private async retrieveKnowledge(ctx: TenantContext, question: string): Promise<RetrievedChunk[]> {
+    const embedding = await this.embeddings.embed(question, { tenantId: ctx.tenantId, userId: ctx.userId }).catch(() => null)
+    interface RawChunk { chunk_id: string; document_id: string; section_label: string | null; page_number: number | null; content: string; cosine: number | null }
+    const rows: RawChunk[] = []
     if (embedding) {
       try {
-        return await this.tenantQuery(ctx, `SELECT d.id AS document_id, d.title, d.classification, d.owner_id, d.updated_at, dv.version_label, c.section_label, c.page_number, c.content, GREATEST(0, LEAST(1, 0.55 * ts_rank(d.search_vector, plainto_tsquery('simple', $2)) + 0.45 * (1 - (de.embedding_vector <=> $3::vector)))) AS combined_score FROM document_chunks c JOIN document_versions dv ON dv.id = c.document_version_id JOIN documents d ON d.id = dv.document_id LEFT JOIN document_embeddings de ON de.document_chunk_id = c.id AND de.model_version = $4 WHERE d.tenant_id = $1 AND d.status = 'ready' AND d.deleted_at IS NULL AND (d.search_vector @@ plainto_tsquery('simple', $2) OR de.embedding_vector IS NOT NULL) ORDER BY combined_score DESC LIMIT 10`, [ctx.tenantId, question, vectorLiteral(embedding), config.embeddingModel])
+        // Production fast path: pgvector cosine over the embedding_vector column.
+        const vectorRows = await this.tenantQuery<RawChunk>(ctx, `SELECT c.id AS chunk_id, c.document_id, c.section_label, c.page_number, c.content, 1 - (de.embedding_vector <=> $3::vector) AS cosine FROM document_chunks c JOIN documents d ON d.id = c.document_id LEFT JOIN document_embeddings de ON de.document_chunk_id = c.id AND de.model_version = $4 WHERE d.tenant_id = $1 AND d.status = 'ready' AND d.deleted_at IS NULL AND de.embedding_vector IS NOT NULL ORDER BY de.embedding_vector <=> $3::vector LIMIT 40`, [ctx.tenantId, question, vectorLiteral(embedding), this.embeddings.model])
+        rows.push(...vectorRows.rows)
       } catch {
-        // pgvector is optional for local PostgreSQL; retain a safe lexical fallback.
+        // Portable path (no pgvector): jsonb embeddings + in-process cosine.
+        try {
+          const embedRows = await this.tenantQuery<{ chunk_id: string; embedding: unknown }>(ctx, `SELECT c.id AS chunk_id, de.embedding FROM document_embeddings de JOIN document_chunks c ON c.id = de.document_chunk_id JOIN documents d ON d.id = c.document_id WHERE de.tenant_id = $1 AND de.model_version = $2 AND d.status = 'ready' AND d.deleted_at IS NULL LIMIT 2000`, [ctx.tenantId, this.embeddings.model])
+          const scored = embedRows.rows
+            .map((row) => ({ chunkId: row.chunk_id, cosine: cosineSimilarity(embedding, Array.isArray(row.embedding) ? row.embedding as number[] : []) }))
+            .filter((item) => item.cosine > 0.01)
+            .sort((left, right) => right.cosine - left.cosine)
+            .slice(0, 24)
+          if (scored.length) {
+            const vectorById = new Map(scored.map((item) => [item.chunkId, item.cosine]))
+            const hydrated = await this.tenantQuery<RawChunk>(ctx, `SELECT c.id AS chunk_id, c.document_id, c.section_label, c.page_number, c.content, NULL::numeric AS cosine FROM document_chunks c WHERE c.tenant_id = $1 AND c.id = ANY($2::uuid[])`, [ctx.tenantId, [...vectorById.keys()]])
+            rows.push(...hydrated.rows.map((row) => ({ ...row, cosine: vectorById.get(String(row.chunk_id)) ?? null })))
+          }
+        } catch { /* fall through to lexical */ }
       }
     }
-    return this.tenantQuery(ctx, `SELECT d.id AS document_id, d.title, d.classification, d.owner_id, d.updated_at, dv.version_label, c.section_label, c.page_number, c.content, GREATEST(0, LEAST(1, ts_rank(d.search_vector, plainto_tsquery('simple', $2)))) AS combined_score FROM document_chunks c JOIN document_versions dv ON dv.id = c.document_version_id JOIN documents d ON d.id = dv.document_id WHERE d.tenant_id = $1 AND d.status = 'ready' AND d.deleted_at IS NULL AND d.search_vector @@ plainto_tsquery('simple', $2) ORDER BY combined_score DESC LIMIT 10`, [ctx.tenantId, question])
+    const tsQuery = tsQueryOr(question)
+    const lexical = tsQuery
+      ? await this.tenantQuery<RawChunk>(ctx, `SELECT c.id AS chunk_id, c.document_id, c.section_label, c.page_number, c.content, NULL::numeric AS cosine FROM document_chunks c WHERE c.tenant_id = $1 AND c.search_tsv @@ to_tsquery('simple', $2) LIMIT 40`, [ctx.tenantId, tsQuery]).catch(() => ({ rows: [] as RawChunk[] }))
+      : { rows: [] as RawChunk[] }
+
+    // Merge: semantic hits that never matched lexically still participate.
+    const merged = new Map<string, RawChunk>()
+    for (const row of [...rows, ...lexical.rows]) {
+      const existing = merged.get(String(row.chunk_id))
+      if (!existing) merged.set(String(row.chunk_id), row)
+      else if (row.cosine !== null && existing.cosine === null) existing.cosine = row.cosine
+    }
+    if (!merged.size) return []
+
+    // Enrich with document metadata + unresolved-conflict signal, then rerank.
+    const chunkIds = [...merged.keys()]
+    const meta = await this.tenantQuery<{ chunk_id: string; title: string; classification: string; updated_at: string; has_conflict: boolean; owner_email: string }>(ctx, `SELECT c.id AS chunk_id, d.title, d.classification, d.updated_at, COALESCE(u.email, 'Unknown owner') AS owner_email, EXISTS (SELECT 1 FROM knowledge_conflicts kc WHERE kc.tenant_id = d.tenant_id AND d.id = ANY(kc.document_ids) AND kc.status <> 'resolved') AS has_conflict FROM document_chunks c JOIN documents d ON d.id = c.document_id LEFT JOIN users u ON u.id = d.owner_id WHERE c.tenant_id = $1 AND c.id = ANY($2::uuid[])`, [ctx.tenantId, chunkIds]).catch(() => ({ rows: [] as Array<{ chunk_id: string; title: string; classification: string; updated_at: string; has_conflict: boolean; owner_email: string }> }))
+    const metaById = new Map(meta.rows.map((row) => [String(row.chunk_id), row]))
+    const candidates = [...merged.values()]
+      .map((row) => {
+        const documentMeta = metaById.get(String(row.chunk_id))
+        return {
+          id: String(row.chunk_id),
+          documentId: String(row.document_id),
+          title: documentMeta?.title ?? 'Document',
+          content: String(row.content ?? ''),
+          semantic: row.cosine === null ? null : Math.max(0, Math.min(1, Number(row.cosine))),
+          classification: (documentMeta?.classification ?? 'Internal') as RetrievedChunk['classification'],
+          updatedAt: documentMeta ? new Date(documentMeta.updated_at).toISOString() : new Date().toISOString(),
+          hasConflict: documentMeta?.has_conflict ?? false,
+          section: row.section_label,
+          page: row.page_number,
+          owner: documentMeta?.owner_email ?? 'Unknown owner',
+        }
+      })
+      .filter((candidate) => canReadClassification(ctx, candidate.classification))
+    const ranked = rerankCandidates(question, candidates, { mode: embedding ? 'hybrid' : 'lexical', semanticAvailable: Boolean(embedding), maxPerDocument: 4 })
+    return ranked.slice(0, 10).map(({ candidate, score }) => ({
+      chunkId: candidate.id,
+      documentId: candidate.documentId,
+      title: candidate.title,
+      classification: candidate.classification,
+      section: candidate.section,
+      page: candidate.page,
+      content: candidate.content,
+      score: Math.round(score * 10000) / 10000,
+      updatedAt: candidate.updatedAt,
+      owner: candidate.owner,
+    }))
   }
+
+  /**
+   * GraphRAG context: link question tokens to governed graph entities and pull a
+   * BOUNDED amount of typed relationship evidence (depth ≤ 1 here) with the
+   * provenance the traversal already carries. Only real graph rows are used —
+   * nothing is inferred or fabricated. Empty when no entity links.
+   */
+  private async buildGraphContext(ctx: TenantContext, question: string): Promise<{ context: string; entities: Array<{ id: string; name: string; entityType: string; relationshipCount: number }> } | null> {
+    const tokens = tokenizeForSearch(question)
+    if (!tokens.length) return null
+    const patterns = tokens.slice(0, 6).map((token) => `%${token}%`)
+    let seeds: Array<{ id: string; name: string; entity_type: string }> = []
+    try {
+      const result = await this.tenantQuery<{ id: string; name: string; entity_type: string }>(ctx, `SELECT id, name, entity_type FROM graph_entities WHERE tenant_id = $1 AND deleted_at IS NULL AND name ILIKE ANY($2::text[]) ORDER BY confidence DESC, length(name) ASC LIMIT 3`, [ctx.tenantId, patterns])
+      seeds = result.rows
+    } catch { return null }
+    if (!seeds.length) return null
+    const lines: string[] = []
+    const entities: Array<{ id: string; name: string; entityType: string; relationshipCount: number }> = []
+    for (const seed of seeds) {
+      const hops = await this.graph.traverse(ctx, String(seed.id), { maxDepth: 1 }).catch(() => [])
+      entities.push({ id: String(seed.id), name: String(seed.name), entityType: String(seed.entity_type), relationshipCount: hops.length })
+      for (const hop of hops.slice(0, 6)) lines.push(`${seed.name} —${hop.relationship}→ ${hop.entity.name} (${hop.entity.entityType}) [depth ${hop.depth}; evidence: ${hop.evidence}]`)
+    }
+    if (!lines.length) return null
+    metrics.increment('smart_corp_graph_context_total')
+    return { context: lines.join('\n'), entities }
+  }
+
 
   async askAI(ctx: TenantContext, input: AIAskInput): Promise<AIAskResult> {
     const question = input.question.trim()
@@ -743,15 +927,21 @@ export class PostgresStore implements Store {
     const responseType = input.requestedFormat === 'table' ? 'table' : input.requestedFormat === 'bullets' ? 'direct_answer' : input.requestedFormat === 'short' ? 'direct_answer' : input.requestedFormat === 'email' ? 'direct_answer' : analyzed.responseType
     const analysis: IntentAnalysis = input.sourceMode ? { ...analyzed, sourceMode: input.sourceMode, responseType } : { ...analyzed, responseType }
     const structuredResult = analysis.task === 'structured_analysis' ? await this.structuredData.query(ctx, retrievalQuestion) : null
-    const result = structuredResult || analysis.sourceMode === 'web' || analysis.needsClarification || analysis.risk === 'critical' || analysis.responseType === 'insufficient_evidence' ? { rows: [] } : await this.retrieveKnowledge(ctx, retrievalQuestion)
-    const citations: Citation[] = result.rows.filter((row) => canReadClassification(ctx, row.classification)).map((row) => ({ id: `${row.document_id}-${row.section_label}`, documentId: row.document_id, title: row.title, section: row.section_label ?? 'Source section', page: row.page_number ?? undefined, owner: row.owner_id, updatedAt: new Date(row.updated_at).toISOString(), relevance: Number(row.combined_score ?? 0.9), classification: row.classification, excerpt: String(row.content).slice(0, 600) }))
+    const skipRetrieval = Boolean(structuredResult) || analysis.sourceMode === 'web' || analysis.needsClarification || analysis.risk === 'critical' || analysis.responseType === 'insufficient_evidence'
+    const retrievedChunks: RetrievedChunk[] = skipRetrieval ? [] : await this.retrieveKnowledge(ctx, retrievalQuestion)
+    const citations: Citation[] = retrievedChunks.map((chunk) => ({ id: `${chunk.documentId}-${chunk.section ?? 'section'}`, documentId: chunk.documentId, title: chunk.title, section: chunk.section ?? 'Source section', page: chunk.page ?? undefined, owner: chunk.owner, updatedAt: chunk.updatedAt, relevance: Math.max(0.05, Math.min(1, chunk.score)), classification: chunk.classification, excerpt: chunk.content.slice(0, 600) }))
+    // P2-E: governed GraphRAG + memory context. Both are optional, bounded,
+    // provenance-labeled DATA sections — never instructions, never fabricated.
+    const graphContext = skipRetrieval ? null : await this.buildGraphContext(ctx, retrievalQuestion)
+    const relevantMemories = skipRetrieval ? [] : await this.memory.relevantMemories(ctx, retrievalQuestion, 3).catch(() => [])
     const route = await this.resolveRoute(ctx, analysis, highestClassification(citations))
     const promptTemplate = getPromptTemplate(analysis)
     const structuredContext = structuredResult ? renderStructuredResult(structuredResult) : undefined
     const availableAgents = await this.listAgents(ctx)
     const agent = availableAgents[0] ?? { name: 'Knowledge Navigator', version: 'v1.0' }
     const delegation = buildDelegationPlan(analysis, availableAgents as AgentRecord[], agent as AgentRecord)
-    const generation = await this.gateway.generate({ question: retrievalQuestion, citations, agentName: agent.name, agentVersion: agent.version, tenantPolicy: 'Citations required; sensitive actions require human approval.', analysis, route, promptVersion: `${promptTemplate.id}-${promptTemplate.version}`, structuredContext })
+    const memoryEvidence = relevantMemories.length ? renderMemoryAsEvidence(relevantMemories.map((item) => item.record)) : undefined
+    const generation = await this.gateway.generate({ question: retrievalQuestion, citations, agentName: agent.name, agentVersion: agent.version, tenantPolicy: 'Citations required; sensitive actions require human approval.', analysis, route, promptVersion: `${promptTemplate.id}-${promptTemplate.version}`, structuredContext, graphContext: graphContext?.context, memoryContext: memoryEvidence })
     const existingConversation = isUuid(input.conversationId) ? await this.tenantQuery<{ id: string }>(ctx, 'SELECT id FROM conversations WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL', [input.conversationId, ctx.tenantId]) : { rows: [] }
     const conversationId = existingConversation.rows[0]?.id ?? crypto.randomUUID()
     const responseId = crypto.randomUUID()
@@ -772,7 +962,7 @@ export class PostgresStore implements Store {
       await client.query(`INSERT INTO audit_events (tenant_id, event_type, description, actor_id, actor_name, resource_type, resource_id, resource_ref, outcome, severity, request_id, metadata) VALUES ($1, 'AI_QUERY', 'Grounded AI response completed', $2, $3, 'ai_response', $4, $5, 'completed', 'low', $6, $7)`, [ctx.tenantId, ctx.userId, ctx.displayName, responseId, `response/${responseId}`, ctx.requestId, JSON.stringify({ agent: agent.name, model: generation.model, citationCount: citations.length })])
       await client.query('COMMIT')
     } catch (error) { await client.query('ROLLBACK'); throw error } finally { client.release() }
-    const response = { id: responseId, question, answer: generation.answer, agent: agent.name, agentVersion: agent.version, model: generation.model, provider: generation.provider, promptVersion: `${promptTemplate.id}-${promptTemplate.version}`, intent: analysis.intent, responseType: (!citations.length && !structuredResult && !analysis.needsClarification && analysis.intent !== 'external_research') ? 'insufficient_evidence' : analysis.responseType, sourceMode: analysis.sourceMode, structuredData: structuredResult ? { title: structuredResult.title, columns: structuredResult.columns, rows: structuredResult.rows, sourceLabel: structuredResult.sourceLabel, asOf: structuredResult.asOf } : undefined, delegation, route: { model: route.model, provider: route.provider, reasoningEffort: route.reasoningEffort, rationale: route.rationale, fallbackModels: route.fallbackModels }, progress: analysis.plan, followUps: analysis.intent === 'comparison' ? ['Show the effective dates', 'Which team owns the decision?', 'Draft an update'] : ['Show the source section', 'What should I do next?', 'Compare this with last year'], createdAt, latencyMs: generation.latencyMs, tokenUsage: { input: generation.inputTokens, output: generation.outputTokens }, trust, citations }
+    const response = { id: responseId, question, answer: generation.answer, agent: agent.name, agentVersion: agent.version, model: generation.model, provider: generation.provider, promptVersion: `${promptTemplate.id}-${promptTemplate.version}`, intent: analysis.intent, responseType: (!citations.length && !structuredResult && !analysis.needsClarification && analysis.intent !== 'external_research') ? 'insufficient_evidence' : analysis.responseType, sourceMode: analysis.sourceMode, structuredData: structuredResult ? { title: structuredResult.title, columns: structuredResult.columns, rows: structuredResult.rows, sourceLabel: structuredResult.sourceLabel, asOf: structuredResult.asOf } : undefined, ...(graphContext ? { relatedEntities: graphContext.entities } : {}), ...(relevantMemories.length ? { memoryContextCount: relevantMemories.length } : {}), delegation, route: { model: route.model, provider: route.provider, reasoningEffort: route.reasoningEffort, rationale: route.rationale, fallbackModels: route.fallbackModels }, progress: analysis.plan, followUps: analysis.intent === 'comparison' ? ['Show the effective dates', 'Which team owns the decision?', 'Draft an update'] : ['Show the source section', 'What should I do next?', 'Compare this with last year'], createdAt, latencyMs: generation.latencyMs, tokenUsage: { input: generation.inputTokens, output: generation.outputTokens }, trust, citations }
     return { response, conversationId }
   }
 

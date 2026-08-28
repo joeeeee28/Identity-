@@ -1,4 +1,4 @@
-import type { AIAskResult, AdminConfigurationRecord, AdminUser, AgentRecord, AnalyticsSnapshot, AuditEvent, DashboardOverview, DocumentRecord, EvaluationSnapshot, ModelProfile, OperatingDecision, OperatingIntelligenceSnapshot, OperatingOutcome, ProactiveAlert, ProductHealthSnapshot, ProductLearningSnapshot, ReadinessSnapshot, ModelScorecard, MeetingRecord, SearchResponse, PolicyRecord, SessionUser, ValueEvent, ValueIntelligenceSnapshot, WorkflowRecord } from './types'
+import type { AIAskResult, AdminConfigurationRecord, AdminUser, AgentRecord, AnalyticsSnapshot, AuditEvent, DashboardOverview, DocumentRecord, EvaluationSnapshot, ModelProfile, OperatingDecision, OperatingIntelligenceSnapshot, OperatingOutcome, ProactiveAlert, ProductHealthSnapshot, ProductLearningSnapshot, ReadinessSnapshot, ModelScorecard, MeetingRecord, SearchSuggestion, UnifiedSearchKind, UnifiedSearchMode, UnifiedSearchResponse, PolicyRecord, SessionUser, ValueEvent, ValueIntelligenceSnapshot, WorkflowRecord } from './types'
 
 class ApiError extends Error {
   constructor(public readonly status: number, public readonly code: string, message: string, public readonly requestId?: string) { super(message) }
@@ -16,7 +16,8 @@ export const api = {
   login: (email: string, password: string, tenantSlug?: string) => request<{ user: SessionUser }>('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password, tenantSlug }) }),
   logout: () => request<void>('/api/auth/logout', { method: 'POST', body: JSON.stringify({}) }),
   health: () => request<{ status: string; checks: { database: string; storage: string; queue: string; aiGateway: string } }>('/health/ready'),
-  search: (query: string) => request<SearchResponse>(`/api/search?q=${encodeURIComponent(query)}`),
+  search: (query: string, options: { mode?: UnifiedSearchMode; kinds?: UnifiedSearchKind[]; classifications?: string[]; limit?: number; offset?: number; maxHops?: number } = {}) => { const params = new URLSearchParams({ q: query }); if (options.mode) params.set('mode', options.mode); if (options.kinds?.length) params.set('kinds', options.kinds.join(',')); if (options.classifications?.length) params.set('classifications', options.classifications.join(',')); if (options.limit) params.set('limit', String(options.limit)); if (options.offset) params.set('offset', String(options.offset)); if (options.maxHops) params.set('maxHops', String(options.maxHops)); return request<UnifiedSearchResponse>(`/api/search?${params.toString()}`) },
+  searchSuggest: (query: string) => request<{ items: SearchSuggestion[] }>(`/api/search/suggest?q=${encodeURIComponent(query)}`),
   overview: () => request<DashboardOverview>('/api/dashboard/overview'),
   alerts: () => request<{ items: ProactiveAlert[] }>('/api/intelligence/alerts'),
   updateAlert: (alertId: string, action: 'dismiss' | 'snooze') => request<{ id: string; status: string }>(`/api/intelligence/alerts/${encodeURIComponent(alertId)}`, { method: 'PATCH', body: JSON.stringify({ action }) }),

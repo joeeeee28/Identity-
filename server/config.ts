@@ -31,6 +31,11 @@ export const config = {
   aiModel: process.env.AI_MODEL ?? 'smart-corp-grounded-v1',
   approvedModels: (process.env.AI_APPROVED_MODELS ?? '').split(',').map((model) => model.trim()).filter(Boolean),
   embeddingModel: process.env.AI_EMBEDDING_MODEL ?? 'text-embedding-3-small',
+  // 'auto' uses the external provider when a key is present, otherwise the
+  // deterministic local feature-hashing vectorizer (see server/ai/embeddings.ts).
+  embeddingProvider: process.env.EMBEDDING_PROVIDER ?? 'auto',
+  searchRateLimitPerMinute: Number(process.env.RATE_LIMIT_SEARCH_PER_MINUTE ?? 120),
+  searchMaxLimit: Number(process.env.SEARCH_MAX_LIMIT ?? 50),
   maxAiTokens: Number(process.env.AI_MAX_TOKENS ?? 1200),
   rateLimitAiPerMinute: Number(process.env.RATE_LIMIT_AI_PER_MINUTE ?? 30),
   rateLimitUploadsPerHour: Number(process.env.RATE_LIMIT_UPLOADS_PER_HOUR ?? 20),
