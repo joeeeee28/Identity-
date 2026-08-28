@@ -121,7 +121,7 @@ export const runWorkerLoop = async (
 
 const main = async () => {
   if (!config.databaseUrl) throw new Error('DATABASE_URL is required to run the worker.')
-  const pool = new Pool({ connectionString: config.databaseUrl, ssl: config.databaseSsl ? { rejectUnauthorized: false } : undefined, max: 10, statement_timeout: 30_000 })
+  const pool = new Pool({ connectionString: config.databaseUrl, ssl: config.databaseSsl ? { rejectUnauthorized: false } : undefined, max: config.databasePoolSize, statement_timeout: 30_000 })
   const queue = new PostgresJobQueue(pool)
   const processors = {
     ingestion: createIngestionProcessor(pool),

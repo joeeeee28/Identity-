@@ -11,6 +11,7 @@ export const config = {
   webOrigin: process.env.WEB_ORIGIN ?? 'http://localhost:5173',
   databaseUrl: process.env.DATABASE_URL,
   databaseSsl: asBoolean(process.env.DATABASE_SSL, false),
+  databasePoolSize: Number(process.env.DATABASE_POOL_SIZE ?? 20),
   devAuthBypass: asBoolean(process.env.DEV_AUTH_BYPASS, true) && (process.env.NODE_ENV ?? 'development') !== 'production',
   devTenantId: process.env.DEV_TENANT_ID ?? '00000000-0000-0000-0000-000000000001',
   devUserId: process.env.DEV_USER_ID ?? '00000000-0000-0000-0000-000000000101',

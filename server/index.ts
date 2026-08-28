@@ -35,7 +35,7 @@ const store = createStore()
 
 // P0 production services (require PostgreSQL). Absent in the development adapter,
 // the routes below fail closed with a clear 503 rather than degrading silently.
-const p0Db = config.databaseUrl ? new TenantDb(new PgConnector(new Pool({ connectionString: config.databaseUrl, ssl: config.databaseSsl ? { rejectUnauthorized: false } : undefined, max: 10, statement_timeout: 15_000 }))) : null
+const p0Db = config.databaseUrl ? new TenantDb(new PgConnector(new Pool({ connectionString: config.databaseUrl, ssl: config.databaseSsl ? { rejectUnauthorized: false } : undefined, max: config.databasePoolSize, statement_timeout: 15_000 }))) : null
 const killSwitch = p0Db ? new KillSwitchService(p0Db) : null
 const approvals = p0Db ? new ApprovalService(p0Db) : null
 const governedActions = p0Db && approvals ? new GovernedActionService(p0Db, approvals) : null

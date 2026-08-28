@@ -470,7 +470,7 @@ export class PostgresStore implements Store {
 
   constructor() {
     if (!config.databaseUrl) throw new Error('DATABASE_URL is required for PostgresStore')
-    this.pool = new Pool({ connectionString: config.databaseUrl, ssl: config.databaseSsl ? { rejectUnauthorized: false } : undefined, max: 20, statement_timeout: 15_000 })
+    this.pool = new Pool({ connectionString: config.databaseUrl, ssl: config.databaseSsl ? { rejectUnauthorized: false } : undefined, max: config.databasePoolSize, statement_timeout: 15_000 })
     this.killSwitch = new KillSwitchService(new TenantDb(new PgConnector(this.pool)))
     this.structuredData = new PostgresStructuredDataProvider(this.pool)
   }
