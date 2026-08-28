@@ -1,178 +1,217 @@
-# Smart-Corp AI — Staging Required Inputs (Free / Open-Source Resolution)
+# Smart-Corp AI — Staging Required Inputs (Free-First Infrastructure Discovery)
 
 **Date:** 28 August 2026
 **Branch:** `arena/01a03cbc-identity`
 
-This document selects the free/open-source infrastructure stack for Smart-Corp AI
-staging, states exactly which external inputs the user must provide, and lists
-what is already automated in the repository. **No credentials are fabricated** —
-every external value is a `<YOUR_…>` placeholder until the user supplies it.
-
-Free-tier limits below were verified against provider documentation in August 2026;
-re-verify before relying on them long-term.
-
----
-
-## 1. Selected free / open-source stack
-
-| Requirement | Selected solution | Classification | Why it won |
-|---|---|---|---|
-| PostgreSQL | **Neon Free** (primary) or **self-hosted Postgres 16** (docker-compose) | FREE FOR STAGING | Native Postgres 16, RLS, SSL, pgvector, zero-ops, scale-to-zero; matches the codebase's real RLS + migrations. Self-hosted fallback is $0 and already in-repo. |
-| Identity (OIDC) | **Keycloak** (self-hosted, Apache-2.0) | FREE (open-source) | Multi-tenant B2B "Organizations" + fine-grained admin are free since 26.0; deepest SAML/LDAP/OIDC under a true open-source license. The app's OIDC flow (`server/identity.ts`) maps `tenant_id` + `roles` claims — Keycloak supports both natively. |
-| Object storage | **Cloudflare R2** (primary) or **MinIO** (self-hosted) | FREE FOR STAGING (R2), FREE (MinIO) | S3-compatible (matches `server/storage.ts`), 10 GB free, **zero egress**. MinIO is the $0 self-hosted fallback (already in compose). |
-| Queue | **PostgreSQL queue (existing)** — Redis **NOT required** | FREE (already implemented) | `server/jobs.ts` implements a durable Postgres queue (SKIP LOCKED, retry/backoff, dead-letter). Introducing Redis/BullMQ would be an unnecessary second datastore. |
-| Malware scanning | **ClamAV** (self-hosted) | FREE (open-source) | Already implemented (`server/security.ts`, clamd INSTREAM, fail-closed). No external credential. |
-| Workers | **Docker worker container** | FREE | `server/worker.ts` + `docker-compose.staging.yml`. |
-| AI provider | **Existing gateway** (OpenAI / Anthropic / Google) | LOW-COST (usage-based) | Already abstracted (`server/ai/gateway.ts`); only an API key is needed. |
-| Observability | **Prometheus + Grafana** (self-hosted) + OpenTelemetry tracing | FREE (open-source) | Already configured (`deploy/prometheus`, `deploy/grafana`, `server/tracing.ts`). |
-| Secrets | **Platform secret manager** (staging) / cloud secret manager (prod) | FREE (staging) | No secrets in Git; `.env.example` placeholders only. |
-| HTTPS/domain | **Platform-provided HTTPS** (Render/Fly/Railway/Cloudflare Pages) or Caddy/Let's Encrypt | FREE | No custom domain required for staging. |
-
-**Alternatives considered (and rejected for now):**
-- **Supabase** — free tier pauses after ~1 week idle and requires manual unpause; weaker fit than Neon for a pure-Postgres app.
-- **Authentik** — excellent UI + forward-auth, but multi-tenant B2B orgs and deepest SAML/LDAP favor Keycloak for this enterprise, multi-tenant product.
-- **AWS S3** — mature but has egress fees; R2's zero egress and 10 GB free tier win for staging.
-- **Upstash Redis** — good free tier (256 MB / 500k cmds) but **unnecessary**: the codebase uses a Postgres queue.
+This document selects the lowest-cost practical infrastructure for deploying the
+already-complete Smart-Corp AI product (P0 + P1 done), states exactly which inputs
+the user must provide, and separates **FREE STAGING** from **PRODUCTION-SUITABLE**.
+Free-tier limits below were verified against provider documentation (Aug 2026);
+re-verify before relying on them long-term. **No credentials, account IDs, or URLs
+are fabricated** — every external value is a `<YOUR_…>` placeholder.
 
 ---
 
-## 2. Free limits (verified August 2026)
+## 1. SELECTED STACK
 
-| Provider | Free tier | Limits that bite |
-|---|---|---|
-| Neon | $0, no card | 0.5 GB storage, ~100 CU-hours/mo compute, autoscale to 2 CU, scale-to-zero after 5 min (cold start), 5 GB egress, 10 branches. Hard cutoffs — suspends when exceeded. |
-| Supabase | $0 | 500 MB DB, 2 active projects, pauses after ~1 week idle (manual unpause). |
-| Cloudflare R2 | $0 (card required to enable) | 10 GB storage, 1M Class A (write) ops, 10M Class B (read) ops, $0 egress. Then $0.015/GB. |
-| Keycloak | $0 (self-hosted) | Runs on your own compute; needs Postgres. No per-seat cost. |
-| ClamAV | $0 | CPU/memory on your worker; DB updates need network. |
-
-**Important distinction:** these free tiers are **suitable for staging/pilot**, not
-unrestricted production. Production migrates to a paid plan (Neon Launch ≈
-$0.106/CU-hr + $0.35/GB-mo, or a managed Postgres) with PITR.
-
----
-
-## 3. Accounts the user must create (minimum set)
-
-| # | Account | Needed for | Free? | Strictly required? |
+| Service | Provider | Classification | Purpose | Reason selected |
 |---|---|---|---|---|
-| 1 | **GitHub** (already owned) | repo + CI | yes | yes |
-| 2 | **Neon** (or any Postgres) | database | yes | yes (or run Docker self-hosted) |
-| 3 | **Cloudflare** | R2 object storage | yes (card needed even for free) | yes (or run MinIO self-hosted) |
-| 4 | **Keycloak** (self-hosted) | identity | yes, $0 | yes (or use customer's existing IdP) |
-| 5 | **AI provider** (OpenAI/Anthropic/Google) | model calls | trial/credits vary | yes for real AI (dev-grounded works without) |
-| 6 | **Microsoft Entra ID / Google Cloud** | the ONE enterprise connector | developer access | yes for the real connector (deferred until credentials) |
+| PostgreSQL | **Neon Free** (primary) / **self-hosted Postgres 16** (Docker) | FREE STAGING | System of record (RLS, migrations, durable queue) | Native Postgres 16 + RLS + pgvector + scale-to-zero; matches the codebase's real RLS. Self-hosted fallback is $0 in-repo. |
+| Identity / OIDC | **Keycloak** (self-hosted, Apache-2.0) | FREE (open-source) | OIDC + SAML + MFA + tenant/role mapping | Multi-tenant "Organizations" + fine-grained admin are free since 26.0; deepest SAML/LDAP/OIDC under true open source; matches `server/identity.ts` `tenant_id`/`roles` claim mapping. |
+| Object storage | **Cloudflare R2** (primary) / **MinIO** (self-hosted) | FREE STAGING (R2) / FREE (MinIO) | Encrypted tenant-scoped docs, signed URLs | S3-compatible (matches `server/storage.ts`); 10 GB free, **zero egress**. |
+| Queue | **PostgreSQL queue (existing)** | FREE (already implemented) | Durable job queue | `server/jobs.ts` already implements SKIP LOCKED queue + retry/backoff/dead-letter. Redis is **not required** — introducing it would be a second datastore for no benefit. |
+| Malware scanning | **ClamAV** (self-hosted) | FREE (open-source) | clamd INSTREAM scanning (fail-closed) | Already implemented in `server/security.ts`; no external credential. |
+| Workers | **Docker worker container** | FREE | Document extraction/chunking/OCR, meeting analysis | `server/worker.ts` + `docker-compose.staging.yml`; runs on the same host. |
+| AI provider | **Google Gemini (free tier)** for staging; **OpenAI / Anthropic** for production | FREE STAGING / LOW-COST PROD | Model calls via `server/ai/gateway.ts` | Gemini has the only unlimited rate-limited free tier (1,500 req/day); the gateway already abstracts google/openai/anthropic. |
+| Observability | **Prometheus + Grafana** (self-hosted) + OTel tracing | FREE (open-source) | Metrics, dashboards, traces | Already configured (`deploy/prometheus`, `deploy/grafana`, `server/tracing.ts`, `server/metrics.ts`). |
+| Secrets | **Platform secret manager** (staging) / cloud secret manager (prod) | FREE STAGING | No secrets in Git | `.env.example` placeholders only; never committed. |
+| HTTPS | **Platform-provided HTTPS** (Render/Fly) or **Caddy/Let's Encrypt** | FREE | TLS termination | No custom domain required for staging. |
+| Hosting | **Render (free tier)** for staging; **Render/Fly/Railway paid** for prod | FREE STAGING / PAID PROD | Run API + worker | Render is the only permanent free tier (750 hrs/mo, cold starts); Fly.io removed its free tier in 2024. |
+| Connector | **Microsoft Graph** (or Google Workspace) | FREE developer access | ONE enterprise connector | Free dev access with an Entra ID / Google Cloud OAuth app; provider-independent framework in `server/connector.ts`. |
+| CI/CD | **GitHub Actions** | FREE | Build/test/deploy | Already configured (`ci.yml`); no credentials in YAML. |
+| Backups | **Encrypted `pg_dump` (staging)** / **provider PITR (prod)** | FREE STAGING / PAID PROD | Recovery | `scripts/backup.sh` (pg_dump + `age` encryption + rotation); Neon PITR/paid tier for production. |
+| Domain/DNS | **None required for staging** | FREE | — | Use the platform's auto-HTTPS URL; a custom domain is a production-only decision. |
 
 ---
 
-## 4. Exact environment variables + where to get each
+## 2. ALTERNATIVES
 
-| Variable | Where to get it | Secret? | Example format | Required? |
+| Alternative | Cost | Advantages | Disadvantages | Why rejected |
 |---|---|---|---|---|
-| `DATABASE_URL` | Neon dashboard → project → **Connect** → copy the pooled connection string | YES | `postgresql://user:pass@host/db?sslmode=require` | yes |
-| `DATABASE_SSL` | set `true` (managed providers require TLS) | no | `true` | yes |
-| `DATABASE_POOL_SIZE` | tunable; default `20` (API) / `10` (worker) | no | `20` | no |
-| `OIDC_ISSUER` | Keycloak → realm → OpenID Endpoint Configuration → `issuer` | no | `https://keycloak.example.com/realms/smart-corp` | yes (for OIDC) |
-| `OIDC_CLIENT_ID` | Keycloak → Clients → create → copy client ID | no | `smart-corp-api` | yes |
-| `OIDC_CLIENT_SECRET` | Keycloak → Clients → Credentials tab | YES | `…` | yes |
-| `OIDC_REDIRECT_URI` | must match your app's callback (exact string) | no | `https://app.example.com/api/auth/oidc/callback` | yes |
-| `OIDC_TENANT_CLAIM` | the claim carrying the org id/slug (default `tenant_id`) | no | `tenant_id` | yes |
-| `OIDC_ROLES_CLAIM` | the claim carrying roles (default `roles`) | no | `roles` | yes |
-| `OIDC_REQUIRE_MFA` | set `true` to require MFA (fail-closed) | no | `false` | no |
-| `SESSION_SECRET` | generate: `openssl rand -hex 32` | YES | 64 hex chars | yes |
-| `STORAGE_ENDPOINT` | Cloudflare → R2 → bucket → **S3 API** endpoint | no | `https://<account_id>.r2.cloudflarestorage.com` | yes |
-| `STORAGE_REGION` | `auto` for R2; `us-east-1` for MinIO/S3 | no | `auto` | yes |
-| `STORAGE_BUCKET` | your bucket name | no | `smart-corp-documents` | yes |
-| `STORAGE_ACCESS_KEY_ID` | Cloudflare → R2 → Manage R2 API tokens → create | YES | `…` | yes |
-| `STORAGE_SECRET_ACCESS_KEY` | same token → secret | YES | `…` | yes |
-| `STORAGE_FORCE_PATH_STYLE` | `true` for R2/MinIO | no | `true` | yes |
-| `AI_PROVIDER` | `openai` / `anthropic` / `google` | no | `openai` | yes (for real AI) |
-| `AI_MODEL` | provider docs; pick a fast tier for QA/extraction, frontier only for complex reasoning | no | `gpt-5.6-terra` | yes |
-| `AI_APPROVED_MODELS` | comma-separated allowlist | no | `gpt-5.6-terra` | yes (prod) |
-| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GOOGLE_AI_API_KEY` | provider console → API keys | YES | `sk-…` | one of |
-| `CONNECTOR_CLIENT_ID/SECRET/TENANT_ID/AUTHORITY/SCOPES/REDIRECT_URI` | Entra ID app registration (or Google Cloud OAuth client) | YES (secret) | `…` | yes (for real connector) |
-
-**Never commit** any value marked YES. Use GitHub Actions secrets or the deployment
-platform's secret manager.
+| Supabase (Postgres) | Free tier | All-in-one (Auth + Storage + DB) | Pauses after ~1 week idle (manual unpause); Auth/Storage vendor-lock | Pure-Postgres app needs only Neon; R2/Keycloak are cleaner fits |
+| AWS S3 | $0.023/GB + egress | Mature, ubiquitous | **Egress fees**; 5 GB free tier | R2's zero egress + 10 GB free win for staging |
+| Authentik (identity) | Free (self-hosted) | Modern UI, forward-auth, SCIM | Multi-tenant B2B orgs weaker than Keycloak | Keycloak's free Organizations + deeper SAML/LDAP fit enterprise multi-tenancy |
+| Upstash Redis | Free tier (256 MB) | Managed, REST API | **Unnecessary** — app uses Postgres queue | No Redis/BullMQ in the codebase |
+| Railway / Fly.io (hosting) | $5/mo | Better DX / edge | No permanent free tier (trial only) | Render's permanent free tier is the only $0 option |
+| OpenAI / Anthropic (staging AI) | $5 trial (expires) | Best frontier models | Credits expire in 3 months; no ongoing free tier | Gemini's unlimited rate-limited free tier is the only sustainable $0 option |
+| AWS RDS / Aurora (prod DB) | Pay-as-you-go | Managed, PITR | No free tier; bills 24/7 | Neon Launch is cheaper at low scale with scale-to-zero |
 
 ---
 
-## 5. User actions (exact steps)
+## 3. REQUIRED ACCOUNTS
+
+| # | Account | For | Free? | Strictly required? |
+|---|---|---|---|---|
+| 1 | GitHub (already owned) | repo + CI | yes | yes |
+| 2 | Neon | database | yes (no card) | yes (or run Docker self-hosted Postgres) |
+| 3 | Cloudflare | R2 object storage | yes (card needed even for free tier) | yes (or run MinIO self-hosted) |
+| 4 | Keycloak (self-hosted) | identity | yes, $0 | yes (or use the customer's existing IdP) |
+| 5 | Google AI (Gemini) | staging model calls | yes (no card) | yes for real AI (dev-grounded works without) |
+| 6 | Render | staging hosting | yes (no card) | yes (or any other host / self-host) |
+| 7 | Microsoft Entra ID / Google Cloud | the ONE connector | developer access | yes for the real connector (deferred until creds) |
+
+---
+
+## 4. REQUIRED INPUTS
+
+| Variable | Description | Where to get it | Secret? | Required? | Stage |
+|---|---|---|---|---|---|
+| `DATABASE_URL` | Postgres connection string | Neon → project → **Connect** → pooled string | YES | yes | both |
+| `DATABASE_SSL` | `true` for managed providers | set `true` | no | yes | prod |
+| `DATABASE_POOL_SIZE` | connection pool (20 API / 10 worker) | tunable | no | no | both |
+| `OIDC_ISSUER` | IdP issuer URL | Keycloak → realm → OpenID config | no | yes (OIDC) | both |
+| `OIDC_CLIENT_ID` | client id | Keycloak → Clients | no | yes | both |
+| `OIDC_CLIENT_SECRET` | client secret | Keycloak → Clients → Credentials | YES | yes | both |
+| `OIDC_REDIRECT_URI` | app callback (exact) | your app's auth callback | no | yes | both |
+| `OIDC_TENANT_CLAIM` | org id/slug claim | default `tenant_id` | no | yes | both |
+| `OIDC_ROLES_CLAIM` | roles claim | default `roles` | no | yes | both |
+| `OIDC_REQUIRE_MFA` | enforce MFA | set `true` to fail-closed | no | no | prod |
+| `SESSION_SECRET` | session signing secret | `openssl rand -hex 32` | YES | yes | both |
+| `STORAGE_ENDPOINT` | S3 endpoint | R2 → bucket → S3 API endpoint | no | yes | both |
+| `STORAGE_REGION` | `auto` (R2) / `us-east-1` | provider | no | yes | both |
+| `STORAGE_BUCKET` | bucket name | your bucket | no | yes | both |
+| `STORAGE_ACCESS_KEY_ID` | R2 access key | R2 → API tokens | YES | yes | both |
+| `STORAGE_SECRET_ACCESS_KEY` | R2 secret | same token | YES | yes | both |
+| `STORAGE_FORCE_PATH_STYLE` | `true` for R2/MinIO | set `true` | no | yes | both |
+| `AI_PROVIDER` | `google` / `openai` / `anthropic` | choice | no | yes | both |
+| `AI_MODEL` | model id | provider docs | no | yes | both |
+| `AI_APPROVED_MODELS` | allowlist | provider docs | no | yes | prod |
+| `GOOGLE_AI_API_KEY` | Gemini key | Google AI Studio → API keys | YES | one of | staging |
+| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | provider key | provider console | YES | one of | prod |
+| `CONNECTOR_CLIENT_ID/SECRET/TENANT_ID/AUTHORITY/SCOPES/REDIRECT_URI` | connector OAuth | Entra ID app / Google OAuth | YES (secret) | yes | connector |
+
+**Never commit** any value marked YES. Use GitHub Actions secrets or the platform secret manager.
+
+---
+
+## 5. EXACT USER ACTIONS
 
 ### Neon (PostgreSQL)
-1. Create a Neon account (no card needed).
-2. Create a project → pick region → Postgres 16.
-3. Open the project dashboard → **Connect** → copy the pooled `DATABASE_URL`.
-4. Enable extensions (`pgcrypto`, `pg_trgm`, `vector` for embeddings) via the SQL editor (the migrations attempt this automatically).
-5. Put `DATABASE_URL` in the deployment secret store. **Do not commit.**
+1. Create a Neon account (no card).
+2. Create a project → Postgres 16 → pick region.
+3. Dashboard → **Connect** → copy pooled `DATABASE_URL`.
+4. (Optional) enable `pgcrypto` / `pg_trgm` / `vector` via the SQL editor.
+5. Put `DATABASE_URL` in the secret store. **Do not commit.**
 
 ### Cloudflare R2 (object storage)
-1. Create a Cloudflare account (a card is required to enable R2 even on the free tier; you are not charged under 10 GB).
-2. R2 → **Create bucket** → name `smart-corp-documents`.
-3. R2 → **Manage R2 API tokens** → create a token with Object Read/Write → copy Access Key ID + Secret.
-4. Copy the bucket's **S3 API** endpoint (`https://<account_id>.r2.cloudflarestorage.com`).
+1. Create a Cloudflare account (card required to enable R2, even free tier; no charge under 10 GB).
+2. R2 → **Create bucket** → `smart-corp-documents`.
+3. R2 → **Manage R2 API tokens** → create Object Read/Write token → copy Access Key ID + Secret.
+4. Copy the bucket **S3 API** endpoint (`https://<account_id>.r2.cloudflarestorage.com`).
 5. Put the four values in the secret store. **Never commit the secret.**
 
 ### Keycloak (identity)
-1. `docker compose -f docker-compose.staging.yml up -d keycloak` (or deploy the Keycloak image).
-2. Log in to the admin console (default admin credential set in the compose env — change it).
-3. Create a realm `smart-corp`.
-4. Create a client `smart-corp-api` (confidential, OIDC, redirect URI = your app callback).
-5. Add client mappers for `tenant_id` (org id/slug) and `roles`.
-6. Create test users: `employee`, `manager`, `admin`, `developer`, `security-admin` with mapped roles.
-7. Put `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_REDIRECT_URI` in the secret store.
+1. `docker compose -f docker-compose.staging.yml up -d keycloak` (or deploy the image).
+2. Admin console → create realm `smart-corp`.
+3. Create a confidential OIDC client `smart-corp-api` (redirect URI = app callback).
+4. Add client mappers for `tenant_id` and `roles`.
+5. Create test users: `employee`, `manager`, `admin`, `developer`, `security-admin` with mapped roles.
+6. Put `OIDC_*` in the secret store.
 
 ### AI provider
-1. Create an account at your chosen provider (OpenAI / Anthropic / Google AI).
-2. Create an API key; note current free credits/trial.
-3. Put the key in the secret store; set `AI_PROVIDER`, `AI_MODEL`, `AI_APPROVED_MODELS`.
+1. **Staging:** Google AI Studio → create a Gemini API key (no card).
+2. **Production:** OpenAI/Anthropic → create a key; note the $5 trial expiry.
+3. Set `AI_PROVIDER`, `AI_MODEL`, `AI_APPROVED_MODELS` + the key in the secret store.
 
-### Connector (ONE, deferred until credentials)
-1. Choose **Microsoft Graph** (Entra ID app registration) or **Google Workspace** (OAuth client).
-2. Register an app, grant the least-privilege scopes (`Sites.Read.All`, `Files.Read.All`).
-3. Copy client id/secret/tenant id and put them in the secret store.
+### Render (hosting)
+1. Create a Render account (no card for free tier).
+2. New Web Service → connect the GitHub repo → build (`npm ci && npm run build`) → start (`node --import tsx server/index.ts`).
+3. Add the environment variables from Section 4.
+4. Render provides an automatic `*.onrender.com` HTTPS URL (no domain needed).
+
+### Connector (deferred until credentials)
+1. Choose Microsoft Graph (Entra ID app) or Google Workspace (OAuth client).
+2. Register an app; grant least-privilege scopes (`Sites.Read.All`, `Files.Read.All`).
+3. Copy client id/secret/tenant id into the secret store.
 
 ---
 
-## 6. What is already automated (no user action needed)
+## 6. KIRO-AUTOMATABLE (no user credentials)
 
-- ✅ PostgreSQL migrations + RLS (13+ migrations, `server/migrate.ts`, RLS proof in `tests/rls.test.ts`)
-- ✅ Tenant isolation (RLS + `app.tenant_id` transaction context + service-level checks)
-- ✅ Object storage adapter (`server/storage.ts`, S3-compatible, signed URLs, cross-tenant rejection)
-- ✅ Malware scanning (`server/security.ts` ClamAV, fail-closed)
-- ✅ Durable queue + worker (`server/jobs.ts`, `server/worker.ts`)
-- ✅ Transactional outbox, kill switch, approvals, reversible action, connector framework, orchestration, OIDC code, webhooks, scheduler, knowledge health, cost/budgets, tracing (P0 + P1)
-- ✅ Observability config (`deploy/prometheus/*`, `deploy/grafana/*`, `server/tracing.ts`, `server/metrics.ts`)
-- ✅ Docker: `docker-compose.yml` (local) + `docker-compose.staging.yml` (self-hosted: Postgres + MinIO + ClamAV + Keycloak + Prometheus + Grafana)
-- ✅ CI/CD: `npm run validate` (lint/typecheck/test/ai-eval/build) + Docker image build
-- ✅ Backup script: `scripts/backup.sh` (encrypted `pg_dump` + rotation)
-- ✅ `.env.example` (placeholders only, no secrets)
+- ✅ All P0/P1 code (outbox, kill switch, approvals, actions, connector framework, orchestration, OIDC code, webhooks, scheduler, knowledge health, cost, tracing, extraction, chunking, OCR, meeting intelligence).
+- ✅ `docker-compose.yml` (local) + `docker-compose.staging.yml` (self-hosted: Postgres + MinIO + ClamAV + Keycloak + Prometheus + Grafana + api + worker).
+- ✅ Migrations + RLS (`server/migrate.ts`, RLS proof in `tests/rls.test.ts`).
+- ✅ Observability config (`deploy/prometheus/*`, `deploy/grafana/*`).
+- ✅ `scripts/backup.sh` (encrypted pg_dump + rotation).
+- ✅ `.env.example` (placeholders only).
+- ✅ CI/CD (`ci.yml`: lint/typecheck/test/ai-eval/intelligence-eval/build).
 
-## 7. What ONLY the user can do (external)
+## 7. USER-ONLY (account ownership / credentials / billing / consent)
 
-- Create provider accounts (Neon, Cloudflare, AI provider, IdP, connector).
+- Create provider accounts (Neon, Cloudflare, Keycloak admin, AI provider, Render, connector).
 - Issue credentials / API keys / OAuth app registration + admin consent.
-- Billing activation (R2 card, AI provider, production Postgres).
-- Domain ownership + DNS (only if a custom domain is desired; not required for staging).
+- Billing activation (R2 card, production Postgres, production AI).
+- Domain ownership + DNS (production only; not needed for staging).
 - Choose/approve the enterprise connector (business decision).
 
 ---
 
-## 8. Cost summary
+## 8. COST
 
 | Tier | Cost |
 |---|---|
-| **Staging (free path)** | **$0** — Neon Free (or self-hosted Postgres), R2 10 GB free (or MinIO), Keycloak, ClamAV, Prometheus/Grafana, GitHub Actions. |
-| **Staging (fully self-hosted)** | **$0** — Docker only (`docker-compose.staging.yml`). |
-| **Minimum production** | **~$50–150/mo** — Neon Launch (or managed Postgres) ~$20–50, AI usage (variable), R2 overage (or S3), a managed IdP (or reuse the customer's IdP for $0). |
+| **STAGING MONTHLY** | **$0** — Render free (or self-hosted Docker), Neon Free (or self-hosted Postgres), R2 10 GB free (or MinIO), Keycloak, ClamAV, Prometheus/Grafana, Gemini free tier. |
+| **MINIMUM PRODUCTION MONTHLY** | **~$50–150/mo** — Neon Launch (~$20–50) or managed Postgres, Render/Fly paid (~$7–25), R2 overage (or S3), paid AI usage (OpenAI/Anthropic), managed IdP (or reuse the customer's IdP for $0). |
+| **OPTIONAL ENTERPRISE** | **$500+/mo** — dedicated Postgres HA, SSO via customer IdP, SOC2-compliant monitoring, multi-region, premium support. |
 
 ---
 
-## 9. Remaining blockers
+## 9. LIMITATIONS (free tiers)
 
-1. Live IdP (Keycloak realm or customer IdP) + `OIDC_*` values.
-2. One AI provider API key.
-3. Real enterprise connector OAuth credentials (Entra ID / Google).
-4. Managed Postgres + hosting for the production deployment (staging can be free/self-hosted).
+| Provider | Free tier | Biting limit |
+|---|---|---|
+| Neon | $0, no card | 0.5 GB storage, ~100 CU-hrs/mo, scale-to-zero (cold starts), hard cutoffs |
+| Cloudflare R2 | $0 (card to enable) | 10 GB storage, 1M writes / 10M reads; then $0.015/GB |
+| Render | $0 | 750 hrs/mo, sleeps after 15 min (30–60 s cold start), no persistent disk on free web services |
+| Google Gemini | $0 (rate-limited) | 15 RPM / 1,500 req/day; Flash-tier only; data may be used for training; no SLA |
+| Keycloak / ClamAV / Prometheus | $0 | run on your own compute (memory/CPU) |
+| OpenAI / Anthropic | $5 trial | expires in 3 months; no ongoing free tier |
 
-Everything else is implemented, tested, and configured in the repository.
+**Distinction:** free tiers are **suitable for staging/pilot**, not unrestricted
+production. Production moves to paid plans with PITR, no cold starts, and an SLA.
+
+---
+
+## 10. MIGRATION (staging → production, no rewrite)
+
+Smart-Corp reads all infrastructure through environment variables and existing
+abstraction boundaries, so migrating requires **configuration only**, no code:
+
+| Layer | Staging | Production | Migration action |
+|---|---|---|---|
+| Database | Neon Free / self-hosted | Neon Launch / managed Postgres | Swap `DATABASE_URL`; run `npm run db:migrate`; enable PITR |
+| Identity | Keycloak (self-hosted) | customer IdP (Entra/Okta) or Keycloak HA | Swap `OIDC_*`; map `tenant_id`/`roles` claims |
+| Storage | R2 free / MinIO | R2 paid / S3 | Swap S3 endpoint + keys |
+| Queue | Postgres queue | Postgres queue (same) | None (already durable) |
+| Malware | ClamAV sidecar | ClamAV sidecar (same) | None |
+| Workers | Docker container | container orchestrator (Fly/Render/K8s) | Redeploy image; same env |
+| AI | Gemini free | OpenAI/Anthropic paid | Swap `AI_PROVIDER`/`AI_MODEL`/key |
+| Observability | self-hosted Prom/Grafana | managed (Grafana Cloud) or self-hosted | Point OTLP/metrics exporter at new backend |
+| Secrets | platform env | cloud secret manager | Move values to the manager; no code change |
+
+Every adapter (storage, scanner, AI gateway, identity, connector) is
+provider-agnostic and driven by config, so production adoption is a redeploy with
+new secrets — never a rewrite.
+
+---
+
+## FINAL OUTPUT
+
+- **Selected stack:** Neon (or self-hosted Postgres), Keycloak, Cloudflare R2 (or MinIO), existing Postgres queue, ClamAV, Docker workers, Gemini (staging) / OpenAI-Anthropic (prod), Prometheus+Grafana, GitHub Actions, Render (staging).
+- **Staging cost:** $0. **Production cost:** ~$50–150/mo minimum.
+- **Accounts required (7):** GitHub, Neon, Cloudflare, Keycloak, AI provider, Render, connector.
+- **Exact inputs:** Section 4 (env vars + where to get each).
+- **Kiro can automate:** Section 6. **User must provide:** Section 7.
+- **Remaining external dependencies:** IdP + `OIDC_*`, AI key, connector OAuth, managed Postgres/hosting.
+
+**No deployment has been performed** — per instruction, this is discovery only.
