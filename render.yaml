@@ -1,0 +1,126 @@
+# Smart-Corp AI — Render Blueprint (free-first staging deployment)
+#
+# Deploy from GitHub: Render → New → Blueprint → point at this repo.
+# This provisions the API (web), the durable worker, and a managed Postgres.
+# Secrets (OIDC, R2, AI, connector) are `sync: false` — set them in the Render
+# dashboard / secret store; they are NEVER committed here.
+#
+# STAGING ($0): free web service (cold starts), free Postgres (90-day trial),
+# Cloudflare R2 (10 GB free), self-hosted Keycloak/ClamAV sidecars.
+# PRODUCTION: upgrade the web/worker `plan` and switch DATABASE_URL to Neon Launch.
+
+services:
+  - type: web
+    name: smart-corp-api
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /health/live
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "3001"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: smart-corp-db
+          property: connectionString
+      - key: DATABASE_SSL
+        value: "true"
+      - key: DATABASE_POOL_SIZE
+        value: "20"
+      - key: DEV_AUTH_BYPASS
+        value: "false"
+      - key: SESSION_SECRET
+        generateValue: true
+      # Identity (Keycloak / customer IdP) — set in dashboard.
+      - key: OIDC_ISSUER
+        sync: false
+      - key: OIDC_CLIENT_ID
+        sync: false
+      - key: OIDC_CLIENT_SECRET
+        sync: false
+      - key: OIDC_REDIRECT_URI
+        sync: false
+      - key: OIDC_TENANT_CLAIM
+        value: tenant_id
+      - key: OIDC_ROLES_CLAIM
+        value: roles
+      - key: OIDC_REQUIRE_MFA
+        value: "false"
+      # Object storage (Cloudflare R2) — set in dashboard.
+      - key: STORAGE_PROVIDER
+        value: s3
+      - key: STORAGE_ENDPOINT
+        sync: false
+      - key: STORAGE_REGION
+        value: auto
+      - key: STORAGE_BUCKET
+        value: smart-corp-documents
+      - key: STORAGE_ACCESS_KEY_ID
+        sync: false
+      - key: STORAGE_SECRET_ACCESS_KEY
+        sync: false
+      - key: STORAGE_FORCE_PATH_STYLE
+        value: "true"
+      # Malware scanning — point at the ClamAV worker/sidecar.
+      - key: MALWARE_SCANNER_PROVIDER
+        value: clamav
+      - key: CLAMD_HOST
+        sync: false
+      - key: CLAMD_PORT
+        value: "3310"
+      # AI provider (Google Gemini free tier for staging; OpenAI/Anthropic for prod).
+      - key: AI_PROVIDER
+        value: google
+      - key: AI_MODEL
+        sync: false
+      - key: AI_APPROVED_MODELS
+        sync: false
+      - key: GOOGLE_AI_API_KEY
+        sync: false
+
+  - type: worker
+    name: smart-corp-worker
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    dockerCommand: node --import tsx server/worker.ts
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: smart-corp-db
+          property: connectionString
+      - key: DATABASE_SSL
+        value: "true"
+      - key: DATABASE_POOL_SIZE
+        value: "10"
+      - key: STORAGE_PROVIDER
+        value: s3
+      - key: STORAGE_ENDPOINT
+        sync: false
+      - key: STORAGE_REGION
+        value: auto
+      - key: STORAGE_BUCKET
+        value: smart-corp-documents
+      - key: STORAGE_ACCESS_KEY_ID
+        sync: false
+      - key: STORAGE_SECRET_ACCESS_KEY
+        sync: false
+      - key: STORAGE_FORCE_PATH_STYLE
+        value: "true"
+      - key: MALWARE_SCANNER_PROVIDER
+        value: clamav
+      - key: CLAMD_HOST
+        sync: false
+      - key: CLAMD_PORT
+        value: "3310"
+
+databases:
+  - name: smart-corp-db
+    plan: free
+    postgresMajorVersion: 16
+    # 90-day free trial on Render; switch DATABASE_URL to Neon Launch for
+    # long-term staging/production (see docs/STAGING_REQUIRED_INPUTS.md).

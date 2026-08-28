@@ -1,37 +1,124 @@
-# Deployment and operations
+# Smart-Corp AI — Live Deployment Guide
 
-## Environments
+**Date:** 28 August 2026
+**Release:** `0459b55` (verified), branch `arena/01a03cbc-identity`
 
-Use separate development, test, staging and production projects, databases, buckets, queues and secret stores. Never use production credentials or customer data locally. Set `NODE_ENV=production`, `DEV_AUTH_BYPASS=false`, `STORAGE_PROVIDER` to a configured encrypted provider, `MALWARE_SCANNER_PROVIDER` to an approved scanner, and a real `DATABASE_URL` before production.
+This guide documents the exact steps to deploy the **completed** Smart-Corp AI
+application (P0 + P1 + document intelligence + meeting intelligence) as a real
+hosted HTTPS application. It complements `docs/DEPLOYMENT.md` (operations) and
+`docs/STAGING_REQUIRED_INPUTS.md` (infrastructure decision).
 
-## Release sequence
+---
 
-1. Build an immutable API/web image from a reviewed commit.
-2. Run typecheck, unit/integration/API/security tests, dependency and container scans.
-3. Apply migrations in staging, run smoke/evaluation tests, then promote the same image.
-4. Apply migrations with a deployment identity, verify `/health/ready`, and roll out behind a feature flag or canary.
-5. Validate tenant isolation, upload processing, AI provider routing, approval gates and audit writes.
-6. Run the tenant-private Phase 6 benchmark in staging, compare it with the approved previous run and obtain evaluation-owner approval for any material regression.
-7. Verify product-learning observation redaction, recommendation governance and feature-flag rollback before enabling a pilot cohort.
-8. Apply migration `012_operating_intelligence.sql` in staging, then validate signal, decision, action, outcome and memory RLS with two tenants.
-9. Apply migration `013_value_intelligence.sql`, validate value-event RLS and verify that measured status requires an approved baseline/outcome workflow.
-10. Verify that an operating- or value-intelligence detector/read-model failure does not block core search, AI questions or approved operational access.
-11. Keep the prior image and migration rollback/forward procedure available. Prefer forward-compatible migrations for zero-downtime rollout.
+## Deployment architecture
 
-## Container shape
+The application is **two services behind one container image**:
 
-The web assets can be served by a CDN or gateway. The API should run as stateless replicas bound to `0.0.0.0`. Workers should run separately and consume durable jobs. PostgreSQL, object storage, cache and queue are managed HA dependencies with private networking and TLS.
+```
+                    ┌─────────────────────────────────────────┐
+  HTTPS (auto) ──►  │  smart-corp-api  (web)                  │
+                    │    - serves the React frontend (dist/)  │
+                    │    - serves the Express API (/api/*)    │
+                    │    - /health/live, /health/ready        │
+                    └─────────────────────────────────────────┘
+                                  │ DATABASE_URL (Postgres 16)
+                                  ▼
+                    ┌─────────────────────────────────────────┐
+                    │  smart-corp-worker  (worker)            │
+                    │    - consumes the durable Postgres queue│
+                    │    - document extraction/chunk/OCR      │
+                    │    - malware scan (ClamAV sidecar)      │
+                    │    - scheduled jobs, webhooks, outbox   │
+                    └─────────────────────────────────────────┘
+```
 
-## Observability
+There is **no Redis** — the durable queue is PostgreSQL (`server/jobs.ts`,
+SKIP LOCKED). ClamAV runs as a sidecar/container; the API and worker point at it
+via `CLAMD_HOST`/`CLAMD_PORT` (fail-closed).
 
-Capture structured JSON logs with request and correlation IDs. Export metrics for HTTP latency/error rate, database latency, queue depth/age, document job failures, retrieval latency/quality, model latency/token/cost, workflow failures, provider fallback rate and security events. Traces must propagate request IDs through API, retrieval, gateway, worker and connector boundaries. Do not put prompts, responses, document content or secrets in metric labels.
+---
 
-Alerts should cover readiness failures, database saturation, queue age, dead letters, high permission-denied anomalies, cross-tenant violation attempts, AI provider error/fallback rate, budget thresholds and backup failures. Phase 6 also requires alerting for benchmark regressions, retrieval/citation degradation, knowledge-gap growth, source conflicts, agent/tool failures, workflow compensation, reformulation spikes, notification fatigue and product-learning event lag.
+## Two deployment paths
 
-## Backup and disaster recovery
+### Path A — Managed free staging (recommended, ~$0)
 
-Define targets with each tenant contract. A recommended initial target is RPO ≤ 15 minutes and RTO ≤ 4 hours, subject to provider capabilities. Enable PostgreSQL point-in-time recovery and encrypted daily snapshots, versioned object storage with retention lock where required, and backup of migration/configuration metadata. Test restore at least quarterly into an isolated environment, verify checksums and run tenant-isolation smoke tests before declaring recovery complete.
+1. **Postgres:** create a Neon project (or use Render's 90-day free Postgres).
+2. **Storage:** create a Cloudflare R2 bucket + API token.
+3. **Identity:** run Keycloak (self-hosted) or use the pilot customer's IdP.
+4. **AI:** Google AI Studio → Gemini API key (free tier) for staging.
+5. **Deploy:** Render → New → **Blueprint** → select this repo → Render reads
+   `render.yaml` and provisions the web service + worker + Postgres.
+6. **Secrets:** set the `sync: false` variables (`OIDC_*`, `STORAGE_*`,
+   `GOOGLE_AI_API_KEY`, `CLAMD_HOST`) in the Render dashboard.
+7. **Migrations:** Render's one-off job, or locally:
+   `DATABASE_URL=… npm run db:migrate`.
 
-## Secrets and rotation
+Render assigns a public `https://<name>.onrender.com` URL (HTTPS automatic).
+No custom domain is required for staging.
 
-Use a managed secret store for database URLs, session secrets, provider credentials, SSO certificates, connector credentials and storage keys. Rotate without rebuilding frontend assets; revoke old sessions/tokens after key compromise. Only server-side code may access provider or storage secrets.
+### Path B — Fully self-hosted ($0, Docker)
+
+```
+docker compose -f docker-compose.staging.yml up -d
+```
+
+This runs Postgres 16 + MinIO + ClamAV + Keycloak + Prometheus + Grafana + the
+API + the worker on your own machine. Add HTTPS with Caddy (automatic
+Let's Encrypt) in front of port 3001.
+
+---
+
+## Environment variables (from the actual code contract)
+
+All values are read by `server/config.ts`. `docs/STAGING_REQUIRED_INPUTS.md`
+§4 lists where to obtain each. The complete placeholder set is in `.env.example`.
+
+Required (production): `DATABASE_URL`, `DATABASE_SSL=true`, `DEV_AUTH_BYPASS=false`,
+`SESSION_SECRET`, `STORAGE_PROVIDER=s3` + R2 keys, `MALWARE_SCANNER_PROVIDER=clamav`
++ `CLAMD_HOST/PORT`, `OIDC_*`, `AI_PROVIDER` + key.
+
+---
+
+## Health checks
+
+| Endpoint | Meaning | Auth |
+|---|---|---|
+| `/health/live` | process liveness + uptime | none |
+| `/health/ready` | dependency readiness (database/storage/queue/AI gateway) | none |
+| `/metrics` | Prometheus metrics | none |
+
+`/health/ready` must report database `connected` (not `development`) and queue
+not `unavailable` before the deployment is considered live.
+
+---
+
+## Verification checklist (after deploy)
+
+1. Open the HTTPS URL → real Smart-Corp UI loads.
+2. Login via OIDC (or `DEV_AUTH_BYPASS=false` password auth) → session issued.
+3. Upload a PDF → malware scan → extract → chunk → index → status `ready`.
+4. Ask an AI question → grounded answer with citation.
+5. Ingest a meeting transcript → summary/decisions/action items with provenance.
+6. Create an approval → approve → execute the reversible archive/restore action.
+7. Check `/metrics` shows real counters (no synthetic values).
+8. Kill-switch test: enable it → autonomous workflow execution is blocked.
+
+---
+
+## Rollback
+
+Render keeps the previous deploy; use **Restore deploy** to roll back. Re-run
+`npm run db:migrate` forward (migrations are append-only). The worker's durable
+queue survives restarts (SKIP LOCKED leases + retry/backoff/dead-letter).
+
+---
+
+## Current status
+
+- **Live preview (this sandbox):** the real application is running in development
+  mode (dev store, dev-grounded AI, dev auth). This is the genuine code, not a
+  mock — but it is **not** the production infrastructure configuration.
+- **Production staging:** requires the external accounts/credentials in
+  `docs/STAGING_REQUIRED_INPUTS.md` §3–5. All deployment config (`render.yaml`,
+  `docker-compose.staging.yml`, `Dockerfile`, `.env.example`) is committed and
+  ready.
