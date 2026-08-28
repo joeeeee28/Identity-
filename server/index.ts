@@ -23,6 +23,7 @@ import { CostService } from './cost.js'
 import { MeetingService } from './meetings.js'
 import { KnowledgeGraphService } from './knowledgeGraph.js'
 import { MemoryService } from './memory.js'
+import { ModelRegistryService } from './modelRegistry.js'
 import { startSpan, extractTraceContext } from './tracing.js'
 import { Pool } from 'pg'
 import { createStore } from './store.js'
@@ -52,6 +53,7 @@ const cost = p0Db ? new CostService(p0Db) : null
 const meetings = p0Db ? new MeetingService(p0Db) : null
 const knowledgeGraph = p0Db ? new KnowledgeGraphService(p0Db) : null
 const memory = p0Db && knowledgeGraph ? new MemoryService(p0Db, knowledgeGraph) : null
+const modelRegistry = p0Db ? new ModelRegistryService(p0Db) : null
 
 const requireP0 = () => {
   if (!p0Db) throw new AppError(503, 'P0_REQUIRES_POSTGRES', 'This capability requires the PostgreSQL production backend.')
@@ -433,6 +435,43 @@ app.get('/api/memory-conflicts', requirePermission('governance.read'), asyncRout
   const subjectId = z.string().trim().min(1).max(240).parse(req.query.subjectId)
   requireP0()
   res.json(await memory!.conflicts(req.context!, subjectId))
+}))
+
+// --- P2-C: intelligent model routing (admin/governance) ---
+const dataClassificationEnum = z.enum(['Public','Internal','Confidential','Restricted','Highly Restricted'])
+const modelStatusEnum = z.enum(['available','degraded','disabled','retired','pending_approval'])
+const modelApprovalEnum = z.enum(['approved','pending','denied'])
+const modelHealthEnum = z.enum(['healthy','degraded','unavailable'])
+const latencyClassEnum = z.enum(['fast','standard','slow'])
+const qualityClassEnum = z.enum(['fast','balanced','frontier'])
+app.get('/api/model-routing/models', requirePermission('governance.read'), asyncRoute(async (req, res) => { requireP0(); res.json({ items: await modelRegistry!.listModels(req.context!) }) }))
+app.put('/api/model-routing/models', requirePermission('governance.manage'), asyncRoute(async (req, res) => {
+  const input = z.object({ modelId: z.string().trim().min(1).max(120), provider: z.string().trim().min(1).max(40), status: modelStatusEnum, approval: modelApprovalEnum, health: modelHealthEnum, allowedClassifications: z.array(dataClassificationEnum).min(1), latencyClass: latencyClassEnum, qualityClass: qualityClassEnum, inputUsdPerMillion: z.number().min(0).optional(), outputUsdPerMillion: z.number().min(0).optional() }).parse(req.body)
+  requireP0()
+  res.json(await modelRegistry!.upsertModel(req.context!, input))
+}))
+app.patch('/api/model-routing/models/:modelId/status', requirePermission('governance.manage'), asyncRoute(async (req, res) => {
+  const input = z.object({ status: modelStatusEnum }).parse(req.body)
+  requireP0()
+  res.json(await modelRegistry!.setStatus(req.context!, String(req.params.modelId), input.status))
+}))
+app.put('/api/model-routing/policy', requirePermission('governance.manage'), asyncRoute(async (req, res) => {
+  const input = z.object({ policyKey: z.string().trim().min(1).max(80).default('default'), allowedProviders: z.array(z.string().min(1).max(40)).optional(), preferLowestCost: z.boolean().optional(), maxCostPerRequestCents: z.number().min(0).optional(), maxLatencyClass: latencyClassEnum.optional(), allowFallback: z.boolean().optional(), highRiskRequiresFrontier: z.boolean().optional(), enabled: z.boolean().optional() }).parse(req.body)
+  requireP0()
+  res.json(await modelRegistry!.upsertPolicy(req.context!, input))
+}))
+app.get('/api/model-routing/decisions', requirePermission('governance.read'), asyncRoute(async (req, res) => { requireP0(); res.json({ items: await modelRegistry!.listDecisions(req.context!) }) }))
+app.post('/api/model-routing/preview', requirePermission('governance.read'), asyncRoute(async (req, res) => {
+  // Routing preview: given task/complexity/risk/classification, show the decision
+  // WITHOUT mutating or persisting (read-only explainability surface).
+  const input = z.object({ task: z.enum(['simple_qa','enterprise_qa','complex_reasoning','extraction','structured_analysis','multimodal','web_research','agent_planning','code','summarization']), complexity: z.enum(['simple','moderate','complex']), risk: z.enum(['low','medium','high','critical']), classification: dataClassificationEnum, sourceMode: z.enum(['internal','structured','web','mixed']).default('internal') }).parse(req.body)
+  requireP0()
+  const analysis = { intent: 'question' as const, task: input.task, responseType: 'direct_answer' as const, complexity: input.complexity, risk: input.risk, needsClarification: false, sourceMode: input.sourceMode, entities: [], plan: [] }
+  const { routeModel, buildCandidates } = await import('./routing.js')
+  const rows = await modelRegistry!.listModels(req.context!)
+  const candidates = buildCandidates(rows.map((r) => ({ modelId: r.modelId, provider: r.provider, status: r.status, approval: r.approval, health: r.health, allowedClassifications: r.allowedClassifications, latencyClass: r.latencyClass, qualityClass: r.qualityClass, inputUsdPerMillion: r.inputUsdPerMillion, outputUsdPerMillion: r.outputUsdPerMillion })))
+  const policy = await modelRegistry!.getPolicy(req.context!)
+  res.json(routeModel({ analysis, classification: input.classification, policy }, candidates))
 }))
 
 if (config.nodeEnv === 'production') {

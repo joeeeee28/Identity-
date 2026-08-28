@@ -1,7 +1,7 @@
 {
-  "runId": "af83049d-7c3f-483c-8afe-012ba6eb4e70",
+  "runId": "9af74dec-2d6c-484f-95bf-5dbd2b131839",
   "datasetVersion": "smart-corp-golden-v1",
-  "completedAt": "2026-08-28T01:09:35.733Z",
+  "completedAt": "2026-08-28T01:19:22.375Z",
   "totalCases": 14,
   "passedCases": 14,
   "score": 100,
@@ -101,7 +101,7 @@
       "category": "Finance",
       "difficulty": "hard",
       "passed": true,
-      "latencyMs": 0,
+      "latencyMs": 1,
       "intent": "comparison",
       "responseType": "comparison",
       "trustLabel": "Needs review",

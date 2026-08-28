@@ -95,3 +95,8 @@ metrics.registerMetric('smart_corp_memory_created_total', 'Total memory records 
 metrics.registerMetric('smart_corp_memory_retrieved_total', 'Total memory records retrieved (authorized).', 'counter')
 metrics.registerMetric('smart_corp_memory_rejected_total', 'Total memory records rejected by authorization.', 'counter')
 metrics.registerMetric('smart_corp_memory_conflict_total', 'Total memory conflicts detected.', 'counter')
+
+// Model routing
+metrics.registerMetric('smart_corp_routing_decisions_total', 'Total model routing decisions.', 'counter')
+metrics.registerMetric('smart_corp_routing_fail_closed_total', 'Total routing decisions that failed closed.', 'counter')
+metrics.registerMetric('smart_corp_routing_fallback_total', 'Total routing decisions that selected a fallback chain.', 'counter')
