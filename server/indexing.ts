@@ -8,6 +8,7 @@ import { chunkText } from './chunking.js'
 import { detectFormat, extractText } from './extraction.js'
 import { appendOutboxEvent } from './outbox.js'
 import type { DbConnector } from './db.js'
+import type { EmbeddingProvider } from './ai/embeddings.js'
 
 export interface IndexingDeps {
   storage: ObjectStorage
@@ -68,8 +69,73 @@ export const createIndexingProcessor = (connector: DbConnector, deps: IndexingDe
       }
       await client.query(`UPDATE documents SET status = 'ready', updated_at = now() WHERE id = $1 AND tenant_id = $2`, [job.documentId, job.tenantId])
       await appendOutboxEvent(client, { tenantId: job.tenantId, aggregateType: 'document', aggregateId: job.documentId, eventType: 'document.indexed', payload: { documentId: job.documentId, chunkCount: chunks.length, format }, idempotencyKey: `document.indexed:${job.documentId}:${row.version_id}` })
+      // Hand off to the embedding stage (idempotent, own retry budget) so the
+      // chunks become semantically searchable without blocking indexing.
+      await client.query(
+        `INSERT INTO document_processing_jobs (tenant_id, document_id, job_type, status, idempotency_key, created_by)
+         VALUES ($1, $2, 'embedding', 'queued', $3, NULL) ON CONFLICT (tenant_id, idempotency_key) DO UPDATE SET updated_at = now()`,
+        [job.tenantId, job.documentId, `embed:${job.documentId}:${row.version_id}:${config.embeddingModel}`],
+      )
 
       logger.info('document_indexed', { workerId, documentId: job.documentId, format, chunks: chunks.length, ocr: extracted.ocrRequired })
+    })
+  }
+}
+
+/**
+ * P2-E embedding processor: computes vector embeddings for document chunks that
+ * do not yet have one for the active model. Always persists the portable jsonb
+ * `embedding`; additionally writes the pgvector `embedding_vector` column when
+ * the extension is present (one failed probe disables the attempt for the run).
+ * Idempotent per (chunk, model) via the UNIQUE constraint; re-runs only fill
+ * gaps, so a new embedding model triggers a backfill by enqueueing jobs again.
+ */
+export const createEmbeddingProcessor = (connector: DbConnector, embeddings: EmbeddingProvider) => {
+  const workerIdLocal = 'embedding'
+  return async (job: JobRecord): Promise<void> => {
+    await connector.withTransaction(async (client) => {
+      await client.query(`SELECT set_config('app.tenant_id', $1, true), set_config('app.user_id', $1, true)`, [job.tenantId])
+
+      const chunks = await client.query<{ id: string; content: string }>(
+        `SELECT c.id, c.content FROM document_chunks c
+         LEFT JOIN document_embeddings de ON de.document_chunk_id = c.id AND de.model_version = $2
+         WHERE c.tenant_id = $1 AND c.document_id = $3 AND de.id IS NULL
+         ORDER BY c.chunk_index ASC LIMIT 256`,
+        [job.tenantId, embeddings.model, job.documentId],
+      )
+      if (!chunks.rows.length) {
+        logger.info('embedding_job_noop', { workerId: workerIdLocal, documentId: job.documentId, reason: 'already_embedded' })
+        return
+      }
+
+      const vectors = await embeddings.embedBatch(chunks.rows.map((chunk) => chunk.content), { tenantId: job.tenantId, userId: job.tenantId })
+      let vectorColumnWorks = true
+      let embedded = 0
+      for (let index = 0; index < chunks.rows.length; index += 1) {
+        const vector = vectors[index]
+        if (!vector) continue
+        const inserted = await client.query<{ id: string }>(
+          `INSERT INTO document_embeddings (tenant_id, document_chunk_id, provider, model_version, dimension, embedding)
+           VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+           ON CONFLICT (tenant_id, document_chunk_id, model_version) DO UPDATE SET embedding = EXCLUDED.embedding, provider = EXCLUDED.provider
+           RETURNING id`,
+          [job.tenantId, chunks.rows[index].id, embeddings.name, embeddings.model, vector.length, JSON.stringify(vector)],
+        )
+        if (vectorColumnWorks && inserted.rows[0]) {
+          try {
+            await client.query(`UPDATE document_embeddings SET embedding_vector = $2::vector WHERE id = $1`, [inserted.rows[0].id, `[${vector.map((value) => Number(value).toFixed(8)).join(',')}]`])
+          } catch {
+            // pgvector not installed: jsonb embedding remains searchable via the
+            // portable cosine path; stop probing for this run.
+            vectorColumnWorks = false
+          }
+        }
+        embedded += 1
+      }
+      if (embedded > 0) {
+        await appendOutboxEvent(client, { tenantId: job.tenantId, aggregateType: 'document', aggregateId: job.documentId, eventType: 'document.embedded', payload: { documentId: job.documentId, chunkCount: embedded, model: embeddings.model, provider: embeddings.name }, idempotencyKey: `document.embedded:${job.documentId}:${embeddings.model}:${embedded}` })
+      }
+      logger.info('document_embedded', { workerId: workerIdLocal, documentId: job.documentId, embedded, total: chunks.rows.length, provider: embeddings.name, model: embeddings.model })
     })
   }
 }

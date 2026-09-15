@@ -2,9 +2,33 @@ import net from 'node:net'
 import { config } from './config.js'
 import { metrics } from './metrics.js'
 import { AppError } from './errors.js'
+import type { TenantContext } from './types.js'
 
 export interface MalwareScanResult { clean: boolean; engine: string; signature?: string }
 export interface MalwareScanner { scan(content: Buffer, fileName: string): Promise<MalwareScanResult> }
+
+/**
+ * Single source of truth for the classification read gate. Applied by retrieval,
+ * unified search AND the RAG citation filter, so an item can never reach a
+ * response body the caller is not cleared to read. Mirrors requirePermission:
+ * org_admin/security_admin satisfy the read clearances they administer.
+ */
+export const canReadClassification = (ctx: TenantContext, classification: string): boolean => {
+  const isAdmin = ctx.roles.includes('org_admin') || ctx.roles.includes('security_admin')
+  if (classification === 'Highly Restricted') return isAdmin || ctx.permissions.includes('knowledge.admin')
+  return isAdmin || ctx.permissions.includes('knowledge.read')
+}
+
+/** Permission required to see each unified-search category (P2-E). */
+export type UnifiedSearchKindPermission = Record<string, string>
+export const UNIFIED_SEARCH_KIND_PERMISSION: UnifiedSearchKindPermission = {
+  document: 'knowledge.read',
+  meeting: 'meetings.read',
+  agent: 'agents.read',
+  workflow: 'workflow.execute',
+  graph: 'analytics.read',
+  memory: 'governance.read',
+}
 
 /** Development-only no-op boundary. Never used outside development. */
 class DevelopmentMalwareScanner implements MalwareScanner {

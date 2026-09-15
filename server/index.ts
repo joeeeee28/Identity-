@@ -25,6 +25,8 @@ import { KnowledgeGraphService } from './knowledgeGraph.js'
 import { MemoryService } from './memory.js'
 import { ModelRegistryService } from './modelRegistry.js'
 import { AgentGovernanceService } from './agentGovernance.js'
+import { SearchService } from './search.js'
+import { createEmbeddingProvider } from './ai/embeddings.js'
 import { startSpan, extractTraceContext } from './tracing.js'
 import { Pool } from 'pg'
 import { createStore } from './store.js'
@@ -56,6 +58,8 @@ const knowledgeGraph = p0Db ? new KnowledgeGraphService(p0Db) : null
 const memory = p0Db && knowledgeGraph ? new MemoryService(p0Db, knowledgeGraph) : null
 const modelRegistry = p0Db ? new ModelRegistryService(p0Db) : null
 const agentGovernance = p0Db && killSwitch ? new AgentGovernanceService(p0Db, new AgentRollbackService(p0Db), killSwitch) : null
+// P2-E unified search (requires the PostgreSQL backend; dev adapter uses the store's own pipeline).
+const search = p0Db && knowledgeGraph && memory && cost ? new SearchService(p0Db, { embeddings: createEmbeddingProvider(p0Db), graph: knowledgeGraph, memory, cost }) : null
 
 const requireP0 = () => {
   if (!p0Db) throw new AppError(503, 'P0_REQUIRES_POSTGRES', 'This capability requires the PostgreSQL production backend.')
@@ -199,7 +203,25 @@ app.get('/api/auth/session', requireAuth, (req: AuthedRequest, res) => res.json(
 
 app.use('/api', requireAuth)
 app.get('/api/me', (req: AuthedRequest, res) => res.json({ user: req.context }))
-app.get('/api/search', requirePermission('knowledge.read'), asyncRoute(async (req, res) => { const query = z.string().trim().max(160).parse(req.query.q ?? ''); res.json(await store.search(req.context!, query)) }))
+// P2-E unified search. Per-category permissions are enforced inside the pipeline
+// (a user may search meetings without knowledge.read); the route requires a session.
+const searchQuerySchema = z.object({ q: z.string().trim().min(2).max(500), mode: z.enum(['auto', 'lexical', 'semantic', 'hybrid', 'graph']).optional(), kinds: z.string().max(120).optional(), classifications: z.string().max(200).optional(), departments: z.string().max(600).optional(), limit: z.coerce.number().int().min(1).max(50).optional(), offset: z.coerce.number().int().min(0).optional(), maxHops: z.coerce.number().int().min(1).max(3).optional() })
+const parseList = (value: string | undefined) => value?.split(',').map((item) => item.trim()).filter(Boolean) ?? []
+app.get('/api/search', limit('search', config.searchRateLimitPerMinute, 60 * 1000), requireAuth, asyncRoute(async (req, res) => {
+  const input = searchQuerySchema.parse(req.query)
+  if (search) return res.json(await search.search(req.context!, { query: input.q, mode: input.mode, kinds: parseList(input.kinds) as never, classifications: parseList(input.classifications) as never, departments: parseList(input.departments), limit: input.limit, offset: input.offset, maxHops: input.maxHops }))
+  return res.json(await store.search(req.context!, input.q, { mode: input.mode, kinds: parseList(input.kinds) as never, classifications: parseList(input.classifications) as never, departments: parseList(input.departments), limit: input.limit, offset: input.offset, maxHops: input.maxHops }))
+}))
+app.get('/api/search/suggest', limit('search', config.searchRateLimitPerMinute, 60 * 1000), requireAuth, asyncRoute(async (req, res) => {
+  const input = z.object({ q: z.string().trim().min(2).max(200), limit: z.coerce.number().int().min(1).max(20).optional() }).parse(req.query)
+  if (search) return res.json({ items: await search.suggest(req.context!, input.q, input.limit) })
+  return res.json({ items: await store.searchSuggest(req.context!, input.q, input.limit) })
+}))
+app.post('/api/search/embeddings/backfill', requirePermission('settings.manage'), limit('search-admin', 6, 60 * 60 * 1000), asyncRoute(async (req, res) => {
+  const input = z.object({ limit: z.number().int().min(1).max(500).optional() }).parse(req.body ?? {})
+  if (!search) throw new AppError(503, 'P0_REQUIRES_POSTGRES', 'Embedding backfill requires the PostgreSQL production backend.')
+  res.status(202).json(await search.queueEmbeddingBackfill(req.context!, input.limit))
+}))
 app.get('/api/intelligence/alerts', requirePermission('knowledge.read'), asyncRoute(async (req, res) => res.json({ items: await store.listProactiveAlerts(req.context!) })))
 app.patch('/api/intelligence/alerts/:alertId', requirePermission('knowledge.read'), asyncRoute(async (req, res) => { const input = alertActionSchema.parse(req.body); res.json(await store.updateProactiveAlert(req.context!, String(req.params.alertId), input.action)) }))
 app.get('/api/readiness', requirePermission('governance.read'), asyncRoute(async (req, res) => res.json(await store.getReadiness(req.context!))))

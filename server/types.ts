@@ -102,6 +102,72 @@ export interface SearchResponse {
   total: number
 }
 
+// ---------------------------------------------------------------------------
+// P2-E unified enterprise search
+// ---------------------------------------------------------------------------
+
+export type UnifiedSearchMode = 'auto' | 'lexical' | 'semantic' | 'hybrid' | 'graph'
+export type UnifiedSearchKind = 'document' | 'meeting' | 'agent' | 'workflow' | 'graph' | 'memory'
+
+export interface SearchScoreFactors {
+  semantic: number | null
+  lexical: number | null
+  phrase: number | null
+  title: number | null
+  authority: number | null
+  freshness: number | null
+  conflictPenalty: number
+  total: number
+  matchedTerms: string[]
+}
+
+export interface UnifiedSearchItem {
+  id: string
+  kind: UnifiedSearchKind
+  title: string
+  snippet: string
+  resource: string
+  classification: Classification
+  updatedAt: string
+  score: number
+  documentId?: string
+  section?: string | null
+  page?: number | null
+  provenance?: string
+  factors: SearchScoreFactors
+}
+
+export interface SearchFacets {
+  kinds: Record<string, number>
+  classifications: Record<string, number>
+}
+
+export interface UnifiedSearchInput {
+  query: string
+  mode?: UnifiedSearchMode
+  kinds?: UnifiedSearchKind[]
+  classifications?: Classification[]
+  departments?: string[]
+  limit?: number
+  offset?: number
+  maxHops?: number
+}
+
+export interface UnifiedSearchResponse {
+  query: string
+  requestedMode: UnifiedSearchMode
+  resolvedMode: Exclude<UnifiedSearchMode, 'auto'>
+  items: UnifiedSearchItem[]
+  total: number
+  offset: number
+  limit: number
+  facets: SearchFacets
+  tookMs: number
+  embeddingCacheHit: boolean
+  degradedReason?: string
+  warnings: string[]
+}
+
 export interface ProactiveAlert {
   id: string
   title: string
@@ -318,6 +384,10 @@ export interface AIResponseRecord {
   progress: string[]
   followUps: string[]
   structuredData?: { title: string; columns: string[]; rows: Array<string[]>; sourceLabel: string; asOf: string }
+  /** P2-E GraphRAG: governed entities linked to the question (provenance: knowledge graph). */
+  relatedEntities?: Array<{ id: string; name: string; entityType: string; relationshipCount: number }>
+  /** P2-E governed memory actually attached to the prompt (count only; content stays server-side). */
+  memoryContextCount?: number
   createdAt: string
   latencyMs: number
   tokenUsage: { input: number; output: number }
@@ -392,7 +462,9 @@ export interface Store {
   authenticatePassword(email: string, password: string, tenantSlug?: string, metadata?: { ip?: string; userAgent?: string }): Promise<LoginResult | null>
   revokeSession(token: string): Promise<void>
   getOverview(ctx: TenantContext): Promise<DashboardOverview>
-  search(ctx: TenantContext, query: string): Promise<SearchResponse>
+  /** P2-E unified search: mode-aware, ACL-gated, reranked, explainable. */
+  search(ctx: TenantContext, query: string, options?: Omit<UnifiedSearchInput, 'query'>): Promise<UnifiedSearchResponse>
+  searchSuggest(ctx: TenantContext, query: string, limit?: number): Promise<Array<{ text: string; source: 'document' | 'graph' | 'meeting' | 'recent' }>>
   listProactiveAlerts(ctx: TenantContext): Promise<ProactiveAlert[]>
   updateProactiveAlert(ctx: TenantContext, alertId: string, action: 'dismiss' | 'snooze'): Promise<{ id: string; status: string }>
   getReadiness(ctx: TenantContext): Promise<ReadinessSnapshot>

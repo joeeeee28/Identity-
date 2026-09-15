@@ -78,7 +78,11 @@ If permissioned evidence is unavailable, the gateway returns `Insufficient evide
 
 ## Universal search and proactive intelligence
 
-`GET /api/search?q=` searches the authorized document, meeting, agent, workflow and audit index. Results are tenant-scoped, classification-filtered and capped server-side; titles/metadata for inaccessible resources are not returned. This is the first step toward indexed plus federated connectors.
+`GET /api/search` is the P2-E unified permission-aware pipeline. Parameters: `q` (required, 2–500 chars), `mode` (`auto` | `lexical` | `semantic` | `hybrid` | `graph`; default `auto` = hybrid), `kinds` (comma list of `document`, `meeting`, `agent`, `workflow`, `graph`, `memory`), `classifications` (comma list), `departments`, `limit` (1–50), `offset`, `maxHops` (1–3, graph mode). The response contains `items` (each with snippet, classification, score and per-factor `factors` explaining the rank), `facets` (kind/classification counts over everything the caller may see), `total`, pagination fields, `resolvedMode`, `tookMs`, `embeddingCacheHit`, an optional `degradedReason` (e.g. `embedding_budget_exceeded`, `embedding_provider_unavailable`) and `warnings`. Every category is gated by its own permission (`knowledge.read`, `meetings.read`, `agents.read`, `workflow.execute`, `analytics.read`, `governance.read`), classification read clearance is enforced per item, and results are tenant-scoped by RLS. Lexical retrieval uses a chunk-level tsvector index with OR term semantics; semantic retrieval uses pgvector when installed and a portable jsonb-cosine path otherwise; `mode=graph` returns bounded knowledge-graph traversal evidence with provenance.
+
+`GET /api/search/suggest?q=` returns tenant-scoped type-ahead suggestions (document/meeting titles, graph entity names and the caller's own recent queries).
+
+`POST /api/search/embeddings/backfill` (`settings.manage`) queues idempotent `embedding` jobs for every ready document whose chunks lack an embedding for the active model; the durable worker performs the embedding work with retry/dead-letter semantics.
 
 `GET /api/intelligence/alerts` derives low-noise alerts from review windows, unresolved knowledge risks, gaps and pending approvals. Each alert includes a source reference and action label so the UI can route it to the relevant governed module.
 

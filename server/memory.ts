@@ -200,6 +200,41 @@ export class MemoryService {
     return authorized
   }
 
+  /**
+   * Query-relevant governed memories for search/RAG integration (P2-E).
+   * Authorization is enforced first (retrieve), then candidates are scored by
+   * deterministic token overlap with the query. Records that conflict on the
+   * same subject are flagged (never silently resolved) so callers can attach a
+   * caveat instead of asserting a disputed fact.
+   */
+  async relevantMemories(ctx: TenantContext, query: string, limit = 3): Promise<Array<{ record: MemoryRecord; relevance: number; hasConflict: boolean }>> {
+    const candidates = await this.retrieve(ctx, { limit: 60 })
+    if (!candidates.length) return []
+    const terms = new Set(query.toLowerCase().normalize('NFKC').split(/[^a-z0-9]+/).filter((term) => term.length > 2))
+    if (!terms.size) return []
+    const scored = candidates.map((record) => {
+      const haystack = `${record.content} ${record.subjectId ?? ''}`.toLowerCase()
+      let overlap = 0
+      for (const term of terms) if (haystack.includes(term)) overlap += 1
+      const relevance = overlap / terms.size
+      return { record, relevance, hasConflict: false }
+    }).filter((item) => item.relevance > 0)
+      .sort((left, right) => right.relevance - left.relevance || right.record.confidence - left.record.confidence)
+      .slice(0, limit)
+    // Flag conflicts within the selected set (same subject, distinct content).
+    const bySubject = new Map<string, Set<string>>()
+    for (const item of scored) {
+      const subject = item.record.subjectId ?? ''
+      if (!subject) continue
+      const seen = bySubject.get(subject) ?? new Set<string>()
+      seen.add(item.record.content.trim().toLowerCase())
+      bySubject.set(subject, seen)
+      item.hasConflict = seen.size > 1
+    }
+    if (scored.length) metrics.increment('smart_corp_memory_context_total', scored.length)
+    return scored
+  }
+
   async get(ctx: TenantContext, id: string): Promise<MemoryRecord> {
     const result = await this.db.query(ctx.tenantId, `SELECT * FROM enterprise_memory WHERE tenant_id = $1 AND id = $2 AND status <> 'deleted'`, [ctx.tenantId, id])
     if (!result.rows[0]) throw new AppError(404, 'MEMORY_NOT_FOUND', 'The memory record was not found.')

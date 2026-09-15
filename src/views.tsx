@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ChangeEvent, type CSSProperties, type FormEvent, type ReactNode } from 'react'
 import { api, ApiError } from './api'
-import type { AIResponseRecord, ActivityItem, AdminConfigurationRecord, AdminUser, AgentRecord, AnalyticsSnapshot, AuditEvent, DashboardOverview, DocumentRecord, EvaluationSnapshot, MeetingRecord, ModelProfile, ModelScorecard, OperatingDecision, OperatingIntelligenceSnapshot, PolicyRecord, ProductHealthSnapshot, ProductLearningSnapshot, ProactiveAlert, ReadinessSnapshot, RiskItem, SessionUser, ValueIntelligenceSnapshot, WorkflowRecord } from './types'
+import type { AIResponseRecord, ActivityItem, AdminConfigurationRecord, AdminUser, AgentRecord, AnalyticsSnapshot, AuditEvent, DashboardOverview, DocumentRecord, EvaluationSnapshot, MeetingRecord, ModelProfile, ModelScorecard, OperatingDecision, OperatingIntelligenceSnapshot, PolicyRecord, ProductHealthSnapshot, ProductLearningSnapshot, ProactiveAlert, ReadinessSnapshot, RiskItem, SearchScoreFactors, SearchSuggestion, SessionUser, UnifiedSearchItem, UnifiedSearchKind, UnifiedSearchMode, UnifiedSearchResponse, ValueIntelligenceSnapshot, WorkflowRecord } from './types'
 import { Icon } from './components/Icon'
 import { Avatar, Button, ClassificationBadge, EmptyState, ErrorNotice, LoadingBlock, MiniSparkline, ProgressBar, SectionHeading, StatusBadge } from './components/Ui'
 import { relativeTime, shortNumber } from './utils'
@@ -318,5 +318,132 @@ export function ValueIntelligence({ onToast }: { onToast: (message: string) => v
     <Panel><PanelTitle icon="lightbulb" title="Why customers would pay" detail="Business case with explicit uncertainty" /><div className="business-case-grid"><div><span>Problem</span><strong>{snapshot.businessCase.problem}</strong></div><div><span>Buyer</span><strong>{snapshot.businessCase.buyer}</strong></div><div><span>Reason to pay</span><strong>{snapshot.businessCase.reasonToPay}</strong></div><div><span>Value received</span><strong>{snapshot.businessCase.valueReceived}</strong></div><div><span>Retention</span><strong>{snapshot.businessCase.retention}</strong></div><div><span>Expansion</span><strong>{snapshot.businessCase.expansion}</strong></div></div><div className="value-footnote"><Icon name="shield" size={13} /> What could destroy the advantage: {snapshot.businessCase.advantageRisk}</div></Panel>
     <div className="value-recommendation"><Icon name="arrow-up-right" size={16} /><span><strong>Current answer: expansion is not yet proven.</strong><small>Invest first in outcome-linked telemetry, identity/connector/action trust and the smallest number of department experiments capable of producing measured value.</small></span><StatusBadge tone="warning">Evidence required</StatusBadge></div>
     {eventOpen && <div className="modal-backdrop" onClick={() => setEventOpen(false)}><div className="modal-card value-modal" onClick={(event) => event.stopPropagation()}><div className="modal-heading"><div><div className="eyebrow">VALUE EVENT</div><h2>Record evidence, not activity</h2><p>Measured values require a source, baseline, attribution and reviewer-approved outcome.</p></div><button className="modal-close inline" onClick={() => setEventOpen(false)}><Icon name="x" size={18} /></button></div><form onSubmit={submitValueEvent}><div className="operating-form-grid"><label className="field-label">Department<input required value={eventForm.department} onChange={(event) => setEventForm({ ...eventForm, department: event.target.value })} /></label><label className="field-label">Event kind<select value={eventForm.kind} onChange={(event) => setEventForm({ ...eventForm, kind: event.target.value })}><option value="question_resolved">Question resolved</option><option value="manual_task_eliminated">Manual task eliminated</option><option value="workflow_completed">Workflow completed</option><option value="approval_accelerated">Approval accelerated</option><option value="decision_accelerated">Decision accelerated</option><option value="knowledge_gap_closed">Knowledge gap closed</option><option value="risk_identified">Risk identified</option><option value="risk_mitigated">Risk mitigated</option></select></label></div><label className="field-label">Title<input required value={eventForm.title} onChange={(event) => setEventForm({ ...eventForm, title: event.target.value })} maxLength={240} /></label><label className="field-label">Linked task, decision or workflow<input required value={eventForm.linkedResource} onChange={(event) => setEventForm({ ...eventForm, linkedResource: event.target.value })} maxLength={240} /></label><label className="field-label">Evidence <small>one reference per line</small><textarea required value={eventForm.evidence} onChange={(event) => setEventForm({ ...eventForm, evidence: event.target.value })} maxLength={4000} /></label><div className="operating-form-grid"><label className="field-label">Metric label<input required value={eventForm.metricLabel} onChange={(event) => setEventForm({ ...eventForm, metricLabel: event.target.value })} maxLength={160} /></label><label className="field-label">Unit<input required value={eventForm.metricUnit} onChange={(event) => setEventForm({ ...eventForm, metricUnit: event.target.value })} maxLength={40} /></label></div><div className="operating-form-grid"><label className="field-label">Before value<input type="number" value={eventForm.beforeValue} onChange={(event) => setEventForm({ ...eventForm, beforeValue: event.target.value })} /></label><label className="field-label">After value<input type="number" value={eventForm.afterValue} onChange={(event) => setEventForm({ ...eventForm, afterValue: event.target.value })} /></label></div><div className="operating-form-grid"><label className="field-label">Status<select value={eventForm.status} onChange={(event) => setEventForm({ ...eventForm, status: event.target.value })}><option value="not_measured">Not measured</option><option value="estimated">Estimated</option><option value="projected">Projected</option><option value="measured">Measured</option></select></label><label className="field-label">Attribution<select value={eventForm.attribution} onChange={(event) => setEventForm({ ...eventForm, attribution: event.target.value })}><option>UNKNOWN</option><option>ESTIMATED</option><option>PARTIALLY_ATTRIBUTABLE</option><option>STRONGLY_ASSOCIATED</option><option>DIRECT</option></select></label></div><div className="operating-form-grid"><label className="field-label">Minutes saved<input type="number" min="0" value={eventForm.minutesSaved} onChange={(event) => setEventForm({ ...eventForm, minutesSaved: event.target.value })} /></label><label className="field-label">Value USD<input type="number" min="0" step="0.01" value={eventForm.valueUsd} onChange={(event) => setEventForm({ ...eventForm, valueUsd: event.target.value })} /></label></div><div className="modal-actions"><Button variant="secondary" onClick={() => setEventOpen(false)}>Cancel</Button><Button type="submit" icon="badge-check" disabled={submitting}>{submitting ? 'Saving…' : 'Record value event'}</Button></div></form></div></div>}
+  </div>
+}
+
+// ---------------------------------------------------------------------------
+// P2-E: unified search explorer
+// ---------------------------------------------------------------------------
+
+const SEARCH_MODES: Array<{ value: UnifiedSearchMode; label: string; hint: string }> = [
+  { value: 'auto', label: 'Smart (hybrid)', hint: 'Balanced keyword + semantic ranking' },
+  { value: 'hybrid', label: 'Hybrid', hint: 'Combined keyword and embedding signals' },
+  { value: 'semantic', label: 'Semantic', hint: 'Embedding similarity only' },
+  { value: 'lexical', label: 'Keyword', hint: 'Exact term matching only' },
+  { value: 'graph', label: 'Graph', hint: 'Knowledge-graph traversal with provenance' },
+]
+const SEARCH_KIND_META: Record<UnifiedSearchKind, { label: string; icon: string }> = {
+  document: { label: 'Documents', icon: 'file-text' },
+  meeting: { label: 'Meetings', icon: 'calendar' },
+  agent: { label: 'Agents', icon: 'bot' },
+  workflow: { label: 'Automations', icon: 'workflow' },
+  graph: { label: 'Graph entities', icon: 'network' },
+  memory: { label: 'Governed memory', icon: 'sparkles' },
+}
+const FACTOR_LABELS: Record<string, string> = { semantic: 'Semantic', lexical: 'Keyword', phrase: 'Phrase', title: 'Title match', authority: 'Authority', freshness: 'Freshness', conflictPenalty: 'Conflict penalty' }
+
+const highlightTerms = (text: string, terms: string[]): Array<string | { match: string }> => {
+  if (!terms.length || !text) return [text]
+  const escaped = terms.map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).filter((term) => term.length > 1).sort((left, right) => right.length - left.length)
+  if (!escaped.length) return [text]
+  const pattern = new RegExp(`(${escaped.join('|')})`, 'gi')
+  return text.split(pattern).map((part) => (terms.some((term) => part.toLowerCase() === term.toLowerCase()) ? { match: part } : part))
+}
+
+export function SearchExplorer({ onToast, onNavigate }: { onToast: (message: string) => void; onNavigate: (view: string) => void }) {
+  const [input, setInput] = useState('')
+  const [query, setQuery] = useState('')
+  const [mode, setMode] = useState<UnifiedSearchMode>('auto')
+  const [kinds, setKinds] = useState<UnifiedSearchKind[]>([])
+  const [classification, setClassification] = useState('all')
+  const [offset, setOffset] = useState(0)
+  const [result, setResult] = useState<UnifiedSearchResponse | null>(null)
+  const [suggestions, setSuggestions] = useState<SearchSuggestion[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [expanded, setExpanded] = useState<string | null>(null)
+  const pageSize = 10
+
+  useEffect(() => {
+    const trimmed = input.trim()
+    if (trimmed.length < 2) { setSuggestions([]); return }
+    const timer = window.setTimeout(() => { api.searchSuggest(trimmed).then(({ items }) => setSuggestions(items)).catch(() => setSuggestions([])) }, 200)
+    return () => window.clearTimeout(timer)
+  }, [input])
+
+  useEffect(() => {
+    if (!query) return
+    let cancelled = false
+    setLoading(true)
+    setError('')
+    api.search(query, { mode, kinds, classifications: classification === 'all' ? [] : [classification], limit: pageSize, offset })
+      .then((response) => { if (!cancelled) setResult(response) })
+      .catch((caught) => { if (!cancelled) setError(caught instanceof ApiError ? caught.message : 'Search is temporarily unavailable.') })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [query, mode, kinds, classification, offset])
+
+  const submit = (event?: FormEvent) => { event?.preventDefault(); const trimmed = input.trim(); if (trimmed.length < 2) { setError('Enter at least 2 characters to search.'); return } setSuggestions([]); setOffset(0); setQuery(trimmed); setExpanded(null) }
+  const toggleKind = (kind: UnifiedSearchKind) => { setOffset(0); setKinds((current) => current.includes(kind) ? current.filter((item) => item !== kind) : [...current, kind]) }
+  const openResult = (item: UnifiedSearchItem) => { const target: Record<UnifiedSearchItem['kind'], string> = { document: 'knowledge', meeting: 'meetings', agent: 'ai-agents', workflow: 'automations', graph: 'knowledge-intelligence', memory: 'governance' }; onNavigate(target[item.kind]); onToast(`Opening ${item.title}`) }
+  const activeKinds = kinds.length ? kinds : (Object.keys(SEARCH_KIND_META) as UnifiedSearchKind[])
+
+  return <div className="view-stack search-explorer">
+    <div className="search-hero">
+      <div className="eyebrow">UNIFIED ENTERPRISE SEARCH</div>
+      <h1>Find authorized knowledge</h1>
+      <p>One permission-aware pipeline across documents, meetings, agents, automations, governed memory and the enterprise knowledge graph.</p>
+      <form className="search-bar" onSubmit={submit} role="search">
+        <Icon name="search" size={18} />
+        <input value={input} onChange={(event) => setInput(event.target.value)} placeholder="Search policies, meetings, decisions, entities…" aria-label="Search query" maxLength={500} />
+        <Button type="submit" icon="search">Search</Button>
+        {suggestions.length > 0 && <div className="search-suggestions" role="listbox" aria-label="Search suggestions">{suggestions.map((suggestion) => <button type="button" key={`${suggestion.source}-${suggestion.text}`} onClick={() => { setInput(suggestion.text); submit(); }}><Icon name={suggestion.source === 'document' ? 'file-text' : suggestion.source === 'meeting' ? 'calendar' : suggestion.source === 'graph' ? 'network' : 'history'} size={13} /><span>{suggestion.text}</span><em>{suggestion.source}</em></button>)}</div>}
+      </form>
+      <div className="search-controls">
+        <div className="search-modes" role="radiogroup" aria-label="Retrieval mode">{SEARCH_MODES.map((entry) => <button key={entry.value} type="button" role="radio" aria-checked={mode === entry.value} className={mode === entry.value ? 'active' : ''} title={entry.hint} onClick={() => { setMode(entry.value); setOffset(0) }}>{entry.label}</button>)}</div>
+        <div className="search-kind-filters" aria-label="Categories">{(Object.keys(SEARCH_KIND_META) as UnifiedSearchKind[]).map((kind) => <button key={kind} type="button" className={kinds.includes(kind) ? 'active' : ''} aria-pressed={kinds.includes(kind)} onClick={() => toggleKind(kind)}><Icon name={SEARCH_KIND_META[kind].icon} size={13} />{SEARCH_KIND_META[kind].label}</button>)}</div>
+        <select className="search-classification" value={classification} onChange={(event) => { setClassification(event.target.value); setOffset(0) }} aria-label="Filter by classification"><option value="all">All classifications</option><option>Public</option><option>Internal</option><option>Confidential</option><option>Restricted</option></select>
+      </div>
+    </div>
+
+    {error && <ErrorNotice message={error} />}
+    {loading && <LoadingBlock lines={4} />}
+
+    {!loading && result && <div className="search-results-panel">
+      <div className="search-results-meta">
+        <span>{result.total} result{result.total === 1 ? '' : 's'} · {result.resolvedMode} mode · {result.tookMs}ms{result.embeddingCacheHit ? ' · cached embedding' : ''}</span>
+        {result.degradedReason && <StatusBadge tone="warning">Degraded: {result.degradedReason.replaceAll('_', ' ')}</StatusBadge>}
+        <span className="search-facet-summary">{activeKinds.filter((kind) => result.facets.kinds[kind]).map((kind) => `${SEARCH_KIND_META[kind].label} (${result.facets.kinds[kind]})`).join(' · ') || 'No categories with results'}</span>
+      </div>
+      {result.warnings.map((warning) => <div className="search-warning" key={warning}><Icon name="triangle-alert" size={14} /><span>{warning}</span></div>)}
+      {result.items.length === 0 && <EmptyState icon="search" title="No authorized results" description="Nothing you are permitted to see matched this query. Try a different mode, widen the categories, or check the source is indexed." />}
+      <div className="search-result-list">
+        {result.items.map((item) => <article className={`search-result-card ${expanded === item.id ? 'expanded' : ''}`} key={`${item.kind}-${item.id}`}>
+          <div className="search-result-head">
+            <button className="search-result-title" onClick={() => openResult(item)}><Icon name={SEARCH_KIND_META[item.kind].icon} size={15} /><strong>{item.title}</strong></button>
+            <div className="search-result-badges"><ClassificationBadge value={item.classification} /><StatusBadge tone="violet" dot={false}>{Math.round(item.score * 100)}% match</StatusBadge></div>
+          </div>
+          <p className="search-result-snippet">{highlightTerms(item.snippet, item.factors.matchedTerms).map((part, index) => typeof part === 'string' ? <span key={index}>{part}</span> : <mark key={index}>{part.match}</mark>)}</p>
+          <div className="search-result-foot">
+            <span>{SEARCH_KIND_META[item.kind].label}{item.section ? ` · ${item.section}` : ''}{item.page ? ` · p. ${item.page}` : ''}</span>
+            {item.provenance && <span className="search-provenance"><Icon name="network" size={12} /> {item.provenance}</span>}
+            <span className="search-updated"><Icon name="clock" size={12} /> {relativeTime(item.updatedAt)}</span>
+            <button className="search-explain-toggle" aria-expanded={expanded === item.id} onClick={() => setExpanded(expanded === item.id ? null : item.id)}><Icon name="gauge" size={12} /> Why this ranked</button>
+          </div>
+          {expanded === item.id && <div className="search-explain">
+            {(Object.keys(FACTOR_LABELS) as Array<keyof typeof FACTOR_LABELS>).map((factor) => { const value = item.factors[factor as keyof SearchScoreFactors]; return <div key={factor} className={`search-factor ${Number(value) < 0 ? 'penalty' : ''}`}><span>{FACTOR_LABELS[factor]}</span><strong>{typeof value === 'number' ? (value > 0 && factor !== 'conflictPenalty' ? '+' : '') + value.toFixed(3) : 'n/a'}</strong></div> })}
+            <div className="search-factor total"><span>Total</span><strong>{item.factors.total.toFixed(3)}</strong></div>
+            {item.factors.matchedTerms.length > 0 && <div className="search-matched-terms">Matched: {item.factors.matchedTerms.join(', ')}</div>}
+          </div>}
+        </article>)}
+      </div>
+      {result.total > pageSize && <div className="search-pagination">
+        <Button variant="secondary" icon="chevron-left" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - pageSize))}>Previous</Button>
+        <span>Showing {result.offset + 1}–{Math.min(result.offset + result.limit, result.total)} of {result.total}</span>
+        <Button variant="secondary" disabled={offset + pageSize >= result.total} onClick={() => setOffset(offset + pageSize)}>Next</Button>
+      </div>}
+    </div>}
+
+    {!loading && !result && !error && <EmptyState icon="search" title="Search your authorized workspace" description="Results are ranked by semantic and keyword relevance, source authority and freshness — and filtered by your permissions and data classification before anything is shown." />}
   </div>
 }

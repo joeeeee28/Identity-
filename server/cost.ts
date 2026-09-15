@@ -20,6 +20,11 @@ const RATE_CARD: Record<string, { input: number; output: number }> = {
   'claude-sonnet-5': { input: 2, output: 10 },
   'claude-opus-5': { input: 5, output: 25 },
   'claude-haiku-4-5': { input: 1, output: 5 },
+  // Embedding models: cost is input-token only.
+  'text-embedding-3-small': { input: 0.02, output: 0 },
+  'text-embedding-3-large': { input: 0.13, output: 0 },
+  // Local deterministic vectorizer: no external spend (kept distinct from external providers).
+  'local-hash-v1': { input: 0, output: 0 },
 }
 
 export const estimateCostCents = (model: string, inputTokens: number, outputTokens: number): number => {

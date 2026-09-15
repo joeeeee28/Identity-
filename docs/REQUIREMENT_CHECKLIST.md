@@ -43,6 +43,32 @@ Remaining P1: document extraction/OCR worker (#55/#56), meeting intelligence (#5
 
 ---
 
+## P2-E IMPLEMENTATION RECORD (this phase)
+
+Enterprise Search & Retrieval Intelligence was implemented directly into the existing architecture, reusing the P2-A knowledge graph, P2-B memory, P1 cost budgets, durable queue and tracing.
+`npm run validate` → lint ✓ · typecheck ✓ · **235 tests / 24 files** ✓ · AI eval 14/14 ✓ · intelligence eval 100 ✓ · search eval ✓ · build ✓.
+
+| P2-E capability | Old | New | Implemented | Tests |
+|---|---|---|---|---|
+| Unified search API + pipeline | ⚠️ ILIKE + hardcoded scores | ✅ `server/search.ts` — modes (auto/lexical/semantic/hybrid/graph), per-kind permission map, classification gate, facets, pagination, `search_events` observability, honest degradation | `tests/search.test.ts` |
+| Semantic search + embeddings | ⚠️ OpenAI-only, dead without pgvector | ✅ batch + retry provider, deterministic local vectorizer (clearly marked), tenant-scoped durable `embedding_cache`, pgvector fast path + portable jsonb-cosine fallback | 4 embedding/cache tests |
+| Hybrid retrieval + reranking | ⚠️ fixed 0.55/0.45 blend | ✅ `server/ai/rerank.ts` — semantic, IDF-lexical, phrase, title, authority, freshness, conflict penalty, mode presets, diversity cap, per-signal explanations | 5 reranker tests |
+| Chunk-level lexical index | ❌ document-level tsvector | ✅ generated `document_chunks.search_tsv` + GIN + OR term semantics (`0.45*plainto` AND-recall defect fixed) | OR-recall test |
+| GraphRAG integration | ❌ graph not connected to retrieval | ✅ entity linking + bounded traversal in askAI (provenance-labeled prompt context, `relatedEntities`) + `mode=graph` search evidence | graph tests |
+| Memory integration | ❌ memory not connected to retrieval | ✅ ACL-authorized query-relevant memories into prompts (injection-safe rendering, conflict flagging) + `memory` search kind | memory authorization tests |
+| Embedding worker stage | ❌ chunks never embedded | ✅ `embedding`/`reindex` job processors + automatic handoff after indexing (upload→…→embed→searchable) + admin backfill endpoint | processor idempotency tests |
+| Search UI | ❌ dropdown only | ✅ `SearchExplorer` view — modes, filters, facets, highlighting, explain panel, pagination, ARIA + responsive | build + manual preview |
+| Search evaluation | ❌ unmeasured ranking | ✅ `npm run search:evaluate` — Recall@5/P@5/MRR/nDCG@5 per mode over versioned fixture corpus + tenant-isolation gate; report checked in | runner asserted by eval |
+| Cost controls | ⚠️ generation only | ✅ external query embeddings metered pre-call against tenant budget; over-budget → explicit lexical degradation; embedding rate card | budget degrade test |
+| Observability | ⚠️ HTTP only | ✅ `smart_corp_search_*`, `smart_corp_embedding_*`, graph/memory context counters + latency histogram + per-query events | events test |
+
+New files: `server/search.ts`, `server/ai/rerank.ts`, `server/searchEvaluate.ts`, `database/migrations/021_search_intelligence.sql`, `tests/search.test.ts`, `reports/search-evaluation-latest.json`, `docs/P2E_SEARCH_INTELLIGENCE.md`.
+Also fixed: admin read-clearance bug in `canReadClassification` (org_admin received zero citations under the old gate).
+
+External (clearly marked, not required for function): OpenAI embeddings (`EMBEDDING_PROVIDER=openai`), optional external reranker (`RERANK_ENDPOINT`), optional pgvector acceleration.
+
+---
+
 ## A. Identity, Security & Platform
 
 Every capability area in the Smart-Corp detailed requirements is mapped to the
