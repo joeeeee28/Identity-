@@ -1,0 +1,77 @@
+{
+  "uid": "smart-corp-ops",
+  "title": "Smart-Corp AI — Operations",
+  "tags": ["smart-corp", "operations"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "HTTP request rate",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [{ "expr": "rate(smart_corp_http_requests_total[5m])", "legendFormat": "req/s" }]
+    },
+    {
+      "type": "timeseries",
+      "title": "HTTP error rate",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [{ "expr": "rate(smart_corp_http_errors_total[5m])", "legendFormat": "errors/s" }]
+    },
+    {
+      "type": "timeseries",
+      "title": "P95 request latency",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [{ "expr": "histogram_quantile(0.95, rate(smart_corp_http_request_duration_seconds_bucket[5m]))", "legendFormat": "p95 (s)" }]
+    },
+    {
+      "type": "stat",
+      "title": "Dependencies ready",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [{ "expr": "smart_corp_dependency_ready", "legendFormat": "{{dependency}}" }]
+    },
+    {
+      "type": "timeseries",
+      "title": "AI calls",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [{ "expr": "rate(smart_corp_ai_calls_total[5m])", "legendFormat": "calls/s" }]
+    },
+    {
+      "type": "timeseries",
+      "title": "AI tokens consumed",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "targets": [{ "expr": "rate(smart_corp_ai_tokens_total[5m])", "legendFormat": "tokens/s" }]
+    },
+    {
+      "type": "timeseries",
+      "title": "Queue jobs claimed",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "targets": [{ "expr": "rate(smart_corp_queue_jobs_total[5m])", "legendFormat": "jobs/s" }]
+    },
+    {
+      "type": "timeseries",
+      "title": "Queue jobs failed / dead-lettered",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "targets": [
+        { "expr": "rate(smart_corp_queue_jobs_failed_total[5m])", "legendFormat": "failed/s" },
+        { "expr": "rate(smart_corp_queue_jobs_dead_lettered_total[5m])", "legendFormat": "dead-lettered/s" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Malware scans and detections",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "targets": [
+        { "expr": "rate(smart_corp_security_scans_total[5m])", "legendFormat": "scans/s" },
+        { "expr": "rate(smart_corp_security_detections_total[5m])", "legendFormat": "detections/s" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Process uptime",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "targets": [{ "expr": "smart_corp_process_uptime_seconds", "legendFormat": "seconds" }]
+    }
+  ]
+}

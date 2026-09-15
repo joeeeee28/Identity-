@@ -1,0 +1,1 @@
+The server intentionally keeps provider, storage, persistence, authentication, and job boundaries separate. Run `npm run db:migrate` against PostgreSQL before using a production environment. The local development adapter is enabled only when DATABASE_URL is absent and is not a production fallback.

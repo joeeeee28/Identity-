@@ -1,0 +1,91 @@
+# Alert rules for Smart-Corp AI. Thresholds are deliberately conservative to
+# avoid alert spam; every rule requires a sustained condition (for-duration).
+groups:
+  - name: smart-corp-availability
+    rules:
+      - alert: AppOutage
+        expr: up{job="smart-corp-api"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "Smart-Corp API is down"
+          description: "The API target has been unreachable for 2 minutes."
+
+      - alert: DatabaseFailure
+        expr: smart_corp_dependency_ready{dependency="database"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "Database is unreachable"
+          description: "PostgreSQL readiness has been 0 for 2 minutes."
+
+      - alert: QueueUnavailable
+        expr: smart_corp_dependency_ready{dependency="queue"} == 0
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Durable queue is unavailable"
+          description: "Background job queue readiness has been 0 for 5 minutes."
+
+      - alert: AIProviderUnavailable
+        expr: smart_corp_dependency_ready{dependency="ai_gateway"} == 0
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "AI provider is not configured"
+          description: "The AI gateway is not routing to a production provider."
+
+  - name: smart-corp-slo
+    rules:
+      - alert: HighErrorRate
+        expr: rate(smart_corp_http_errors_total[5m]) / rate(smart_corp_http_requests_total[5m]) > 0.05
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "High API error rate"
+          description: "More than 5% of requests are failing (5xx/4xx) over 5 minutes."
+
+      - alert: HighLatency
+        expr: histogram_quantile(0.95, rate(smart_corp_http_request_duration_seconds_bucket[5m])) > 2
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "P95 latency above 2s"
+          description: "The 95th percentile HTTP latency has exceeded 2 seconds for 10 minutes."
+
+  - name: smart-corp-queue
+    rules:
+      - alert: DeadLetterGrowth
+        expr: increase(smart_corp_queue_jobs_dead_lettered_total[30m]) > 10
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Dead-letter queue is growing"
+          description: "More than 10 jobs dead-lettered in the last 30 minutes."
+
+      - alert: WorkerFailureRate
+        expr: rate(smart_corp_queue_jobs_failed_total[15m]) / (rate(smart_corp_queue_jobs_total[15m]) + 1) > 0.2
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "Elevated worker failure rate"
+          description: "More than 20% of claimed jobs are failing over 15 minutes."
+
+  - name: smart-corp-ai
+    rules:
+      - alert: AIErrorRate
+        expr: rate(smart_corp_ai_errors_total[15m]) > 0.05
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "AI generation errors"
+          description: "AI model generations are failing at an elevated rate."
+
+  - name: smart-corp-security
+    rules:
+      - alert: MalwareDetection
+        expr: increase(smart_corp_security_detections_total[1h]) > 0
+        labels: { severity: info }
+        annotations:
+          summary: "Malware detected in uploaded document"
+          description: "A document was rejected by the malware scanner."

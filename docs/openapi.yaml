@@ -1,0 +1,359 @@
+openapi: 3.1.0
+info:
+  title: Smart-Corp AI API
+  version: 0.1.0
+  description: Tenant-scoped enterprise intelligence API.
+servers:
+  - url: https://api.example.com
+security:
+  - sessionCookie: []
+paths:
+  /health/live:
+    get:
+      security: []
+      summary: Liveness probe
+      responses:
+        '200': { description: Process is alive }
+  /health/ready:
+    get:
+      security: []
+      summary: Dependency readiness probe
+      responses:
+        '200': { description: Readiness state }
+  /api/auth/session:
+    get:
+      summary: Resolve the authenticated session
+      responses:
+        '200':
+          description: Session identity and derived tenant context
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/dashboard/overview:
+    get:
+      summary: Get tenant intelligence overview
+      responses:
+        '200': { description: Overview snapshot }
+  /api/search:
+    get:
+      summary: Search authorized enterprise resources
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string, minLength: 2, maxLength: 160 } }
+      responses:
+        '200': { description: Universal search results }
+  /api/intelligence/alerts:
+    get:
+      summary: Get evidence-backed proactive intelligence alerts
+      responses:
+        '200': { description: Tenant-scoped proactive alerts }
+  /api/intelligence/alerts/{alertId}:
+    patch:
+      summary: Dismiss or snooze a proactive alert
+      parameters:
+        - { name: alertId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action: { type: string, enum: [dismiss, snooze] }
+      responses:
+        '200': { description: Alert state updated }
+  /api/readiness:
+    get:
+      summary: Get tenant launch-readiness checks
+      responses:
+        '200': { description: Readiness assessment }
+  /api/product-health:
+    get:
+      summary: Get measured, estimated and unmeasured product-health dimensions
+      responses:
+        '200': { description: Product health assessment }
+  /api/pilot/environment:
+    get:
+      summary: Get the resettable synthetic enterprise pilot environment
+      responses:
+        '200': { description: Synthetic departments, personas, permission checks and journeys }
+  /api/pilot/environment/reset:
+    post:
+      summary: Reset the development-only synthetic pilot fixture
+      responses:
+        '200': { description: Synthetic fixture reset; no production data is changed }
+        '409': { description: Production adapter does not expose fixture reset }
+  /api/product-learning:
+    get:
+      summary: Get the tenant-scoped continuous product-learning snapshot
+      responses:
+        '200': { description: Quality, failures, knowledge, experiments, recommendations, value and scale evidence }
+  /api/product-learning/benchmark:
+    get:
+      summary: Get the permanent 120-task enterprise benchmark catalog
+      responses:
+        '200': { description: Benchmark task definitions and evaluation methods }
+  /api/product-learning/scale:
+    get:
+      summary: Get modeled scale scenarios for 100 to 100000 users
+      responses:
+        '200': { description: Explicit scale assumptions and bottlenecks; not a load test }
+  /api/product-learning/recommendations:
+    get:
+      summary: Get evidence-backed improvement recommendations
+      responses:
+        '200': { description: Governed recommendations }
+  /api/product-learning/recommendations/{recommendationId}:
+    patch:
+      summary: Accept, defer or reject a recommendation without deploying a change
+      parameters:
+        - { name: recommendationId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision]
+              properties:
+                decision: { type: string, enum: [accepted, deferred, rejected] }
+      responses:
+        '200': { description: Governed decision recorded }
+  /api/operating-intelligence:
+    get:
+      summary: Get tenant-scoped signals, context, decisions, processes, outcomes and memory
+      responses:
+        '200': { description: Operating intelligence read model }
+  /api/operating-intelligence/decisions:
+    post:
+      summary: Create a proposed decision record with evidence and alternatives
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, context, evidence, alternatives, recommendation, risk, classification]
+              properties:
+                title: { type: string, maxLength: 240 }
+                context: { type: string, maxLength: 2000 }
+                evidence: { type: array, items: { type: string, maxLength: 500 }, minItems: 1, maxItems: 20 }
+                alternatives: { type: array, items: { type: string, maxLength: 500 }, maxItems: 10 }
+                recommendation: { type: string, maxLength: 1200 }
+                risk: { type: string, enum: [low, medium, high, critical] }
+                classification: { type: string, enum: [Public, Internal, Confidential, Restricted] }
+                workflowId: { type: string }
+      responses:
+        '201': { description: Proposed decision record }
+  /api/operating-intelligence/decisions/{decisionId}/approve:
+    post:
+      summary: Approve a proposed decision as the authorized human
+      parameters:
+        - { name: decisionId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Approved decision record }
+  /api/operating-intelligence/decisions/{decisionId}/action:
+    post:
+      summary: Request a governed workflow action for an approved decision
+      parameters:
+        - { name: decisionId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [workflowId]
+              properties:
+                workflowId: { type: string }
+      responses:
+        '202': { description: Action queued or awaiting workflow approval }
+  /api/operating-intelligence/outcomes:
+    post:
+      summary: Record expected or measured before/after outcome evidence
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decisionId, expected, actual, before, after, status, evidence]
+              properties:
+                decisionId: { type: string }
+                expected: { type: string }
+                actual: { type: string }
+                before: { type: array, items: { type: object } }
+                after: { type: array, items: { type: object } }
+                status: { type: string, enum: [measured, expected, not_measured, failed] }
+                evidence: { type: array, items: { type: string } }
+      responses:
+        '201': { description: Outcome-linked decision record }
+  /api/value-intelligence:
+    get:
+      summary: Get activity, value, cost, ROI evidence, feature portfolio and customer health
+      responses:
+        '200': { description: Tenant-scoped value intelligence read model }
+  /api/value-intelligence/events:
+    post:
+      summary: Record an evidence-linked value event
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [department, kind, title, linkedResource, evidence, status, confidence, attribution, minutesSaved, valueUsd, costUsd, before, after]
+              properties:
+                department: { type: string }
+                kind: { type: string, enum: [question_resolved, manual_task_eliminated, workflow_completed, approval_accelerated, incident_resolved, decision_accelerated, knowledge_gap_closed, duplicate_work_avoided, process_cycle_time_reduced, risk_identified, risk_mitigated, customer_response_accelerated] }
+                title: { type: string }
+                linkedResource: { type: string }
+                evidence: { type: array, items: { type: string }, minItems: 1 }
+                status: { type: string, enum: [measured, estimated, projected, not_measured] }
+                confidence: { type: string, enum: [HIGH, MEDIUM, LOW, UNKNOWN] }
+                attribution: { type: string, enum: [DIRECT, STRONGLY_ASSOCIATED, PARTIALLY_ATTRIBUTABLE, ESTIMATED, UNKNOWN] }
+                minutesSaved: { type: number, nullable: true }
+                valueUsd: { type: number, nullable: true }
+                costUsd: { type: number, nullable: true }
+                before: { type: array, items: { type: object } }
+                after: { type: array, items: { type: object } }
+      responses:
+        '201': { description: Value event recorded with provenance }
+  /api/knowledge/documents:
+    get:
+      summary: Search permission-scoped knowledge sources
+      parameters:
+        - { name: search, in: query, schema: { type: string, maxLength: 160 } }
+        - { name: status, in: query, schema: { type: string } }
+        - { name: classification, in: query, schema: { $ref: '#/components/schemas/Classification' } }
+      responses:
+        '200': { description: Paginated document list }
+    post:
+      summary: Upload a source for asynchronous ingestion
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+                title: { type: string, maxLength: 240 }
+                classification: { $ref: '#/components/schemas/Classification' }
+      responses:
+        '202': { description: Queued security scan and processing }
+        '422': { description: File rejected by security controls }
+  /api/ai/ask:
+    post:
+      summary: Run a grounded, permission-aware AI request
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [question]
+              properties:
+                question: { type: string, minLength: 1, maxLength: 2000 }
+                agentId: { type: string }
+                conversationId: { type: string }
+      responses:
+        '200': { description: AI response with citations and trust assessment }
+        '429': { $ref: '#/components/responses/RateLimited' }
+  /api/ai/models:
+    get:
+      summary: List policy-selectable model profiles
+      responses:
+        '200': { description: Provider-neutral model catalog }
+  /api/meetings:
+    get:
+      summary: List tenant-scoped meeting intelligence records
+      responses:
+        '200': { description: Meeting records }
+  /api/ai/tools:
+    get:
+      summary: List schema-backed tools for the current agent context
+      responses:
+        '200': { description: Governed tool definitions }
+  /api/ai/tools/execute:
+    post:
+      summary: Validate and execute a governed tool request
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [toolKey, input]
+              properties:
+                toolKey: { type: string }
+                input: { type: object, additionalProperties: true }
+                confirmed: { type: boolean }
+      responses:
+        '202': { description: Completed, confirmation required, or awaiting approval }
+  /api/ai/feedback:
+    post:
+      summary: Record typed feedback on an AI response
+      responses:
+        '201': { description: Feedback recorded }
+  /api/evaluations/overview:
+    get:
+      summary: Get the latest golden-set evaluation snapshot
+      responses:
+        '200': { description: Evaluation results and retrieval metrics }
+  /api/evaluations/run:
+    post:
+      summary: Run the versioned AI evaluation suite
+      responses:
+        '202': { description: Evaluation completed or queued }
+  /api/workflows/{workflowId}/execute:
+    post:
+      summary: Create a durable workflow execution
+      parameters:
+        - { name: workflowId, in: path, required: true, schema: { type: string } }
+      responses:
+        '202': { description: Queued or awaiting human approval }
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: sc_session
+  schemas:
+    Classification:
+      type: string
+      enum: [Public, Internal, Confidential, Restricted, Highly Restricted]
+    SessionResponse:
+      type: object
+      properties:
+        user:
+          type: object
+          required: [tenantId, userId, sessionId, email, roles, permissions]
+          properties:
+            tenantId: { type: string, format: uuid }
+            userId: { type: string, format: uuid }
+            sessionId: { type: string }
+            email: { type: string, format: email }
+            displayName: { type: string }
+            roles: { type: array, items: { type: string } }
+            permissions: { type: array, items: { type: string } }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, requestId]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            requestId: { type: string }
+  responses:
+    Unauthorized:
+      description: Authentication required
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    RateLimited:
+      description: Rate limit exceeded
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
